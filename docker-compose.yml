@@ -1,0 +1,33 @@
+services:
+  # 1. Database
+  db:
+    image: neo4j:community
+    ports:
+      - "7474:7474" # Browser UI
+      - "7687:7687" # Bolt connection
+    environment:
+      - NEO4J_AUTH=neo4j/password
+    volumes:
+      - neo4j_data:/data
+
+  # 2. Python API
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=bolt://db:7687
+      - OLLAMA_HOST=http://host.docker.internal:11434 # Connects to Ollama on your host machine
+    depends_on:
+      - db
+
+  # 3. React UI
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+volumes:
+  neo4j_data:

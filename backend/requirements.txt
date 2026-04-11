@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+langchain
+ollama
+pydantic
+neo4j
+httpx
+pydantic
+python-dotenv
