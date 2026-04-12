@@ -4,14 +4,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
+import uvicorn
+
 
 app = FastAPI(title="Smart Mind Map Generator API")
 
 # --- 1. CORS CONFIGURATION ---
-# This allows your React app (typically on port 5173) to talk to this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", "http://localhost:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -26,9 +27,10 @@ class SuggestionResponse(BaseModel):
     suggestions: List[str]
 
 # --- 3. CONSTANTS ---
- # If running inside Docker, change localhost to host.docker.internal
-OLLAMA_URL = "http://host.docker.internal:11434/api/generate"
-MODEL_NAME = "phi"
+#OLLAMA_URL = "http://host.docker.internal:11434/api/generate"
+OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+MODEL_NAME = "phi" 
+
 
 # --- 4. ROUTES ---
 
@@ -59,7 +61,7 @@ async def get_suggestions(request: ConceptRequest):
                     "format": "json",
                     "stream": False
                 },
-                timeout=60.0 # AI can take a while to "think"
+                timeout=60.0
             )
             
             response.raise_for_status()
@@ -68,11 +70,24 @@ async def get_suggestions(request: ConceptRequest):
             # Ollama returns the AI text in the "response" field
             raw_ai_text = result.get("response", "")
             
-            # Convert the string from the AI into a Python dictionary
-            data = json.loads(raw_ai_text)
-            suggestions = data.get("subtopics", [])
+            # Nettoyage du JSON (extrait le contenu entre les balises markdown si présentes)
+            clean_json = raw_ai_text.strip()
+            if "```json" in clean_json:
+                clean_json = clean_json.split("```json")[1].split("```")[0].strip()
+            elif "```" in clean_json:
+                clean_json = clean_json.split("```")[1].split("```")[0].strip()
 
-            # Ensure we return exactly what the frontend expects
+            try:
+                data = json.loads(clean_json)
+            except json.JSONDecodeError:
+                # Fallback if parsing fails to see what exactly was returned
+                print(f"Failed to parse AI output: {raw_ai_text}")
+                raise HTTPException(status_code=500, detail="L'IA a retourné un format invalide.")
+            
+            # Flexible parsing in case the AI changes the key name
+            suggestions = data.get("subtopics") or data.get("suggestions") or []
+            print(f"Generated suggestions for '{request.concept}': {suggestions}")
+
             return {
                 "parent": request.concept,
                 "suggestions": suggestions[:5]
@@ -86,5 +101,4 @@ async def get_suggestions(request: ConceptRequest):
             raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
