@@ -1,9 +1,13 @@
 fastapi
 uvicorn
 langchain
+langchain_community==0.3.0
+langchain_huggingface
 ollama
 pydantic
 neo4j
 httpx
+sentence-transformers
+faiss-cpu
 pydantic
 python-dotenv

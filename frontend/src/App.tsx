@@ -96,9 +96,7 @@ const App = () => {
   // 4. Effet pour gérer le layout et le redimensionnement automatiquement
   useEffect(() => {
     if (cyRef.current && elements.length > 0) {
-      // On s'assure que Cytoscape connaît la taille réelle de son conteneur
       cyRef.current.resize();
-      // On lance le layout pour organiser les éléments
       cyRef.current.layout({ 
         name: 'cose-bilkent', 
         animate: true, 
