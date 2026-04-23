@@ -1,143 +1,242 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import CytoscapeComponent from 'react-cytoscapejs';
-import cytoscape from 'cytoscape';
-import coseBilkent from 'cytoscape-cose-bilkent';
 import axios from 'axios';
+import { BookOpen, Loader2, ChevronRight, Activity, X } from 'lucide-react';
+import cytoscape from 'cytoscape';
 
-// Enregistrement du layout
-cytoscape.use(coseBilkent);
+const API_BASE = "http://localhost:8000";
 
-const App = () => {
-  const [concept, setConcept] = useState('');
+// --- TYPES TYPESCRIPT ---
+interface Evidence {
+  title: string;
+  pubid: string;
+  url: string;
+  preview: string;
+}
+
+interface SelectedNode {
+  id: string;
+  evidence: Evidence[];
+}
+
+const App: React.FC = () => {
+  const [concept, setConcept] = useState<string>("");
   const [elements, setElements] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [selectedNode, setSelectedNode] = useState<SelectedNode | null>(null);
+  const [fullArticle, setFullArticle] = useState<string>("");
+  const [fetchingFull, setFetchingFull] = useState<boolean>(false);
+
   const cyRef = useRef<cytoscape.Core | null>(null);
 
-  const style: cytoscape.Stylesheet[] = [
+  // Configuration du layout de la carte
+  const layout = { 
+    name: 'breadthfirst', 
+    directed: true, 
+    padding: 30,
+    spacingFactor: 1.2 
+  };
+  
+  // Style visuel de la carte
+  const style: any[] = [
     {
       selector: 'node',
       style: {
-        'background-color': '#3b82f6',
+        'background-color': '#2563eb',
         'label': 'data(label)',
         'color': '#fff',
         'text-valign': 'center',
         'text-halign': 'center',
-        'width': 120,
-        'height': 50,
+        'font-size': '12px',
+        'width': '120px',
+        'height': '40px',
         'shape': 'round-rectangle',
-        'font-size': '12px'
+        'font-weight': 'bold',
+        'text-wrap': 'wrap',
+        'text-max-width': '100px'
       }
     },
     {
       selector: 'edge',
       style: {
         'width': 2,
-        'line-color': '#94a3b8',
-        'target-arrow-color': '#94a3b8',
+        'line-color': '#cbd5e1',
+        'target-arrow-color': '#cbd5e1',
         'target-arrow-shape': 'triangle',
-        'curve-style': 'bezier'
+        'curve-style': 'bezier',
+        'arrow-scale': 1.2
+      }
+    },
+    {
+      selector: ':selected',
+      style: {
+        'background-color': '#1e40af',
+        'line-color': '#1e40af',
+        'target-arrow-color': '#1e40af',
+        'border-width': 3,
+        'border-color': '#93c5fd'
       }
     }
   ];
 
+  // Fonction pour générer les nouveaux nœuds via le RAG
   const handleGenerate = async () => {
-    if (!concept || isLoading) return;
-
-    setIsLoading(true);
+    if (!concept) return;
+    setLoading(true);
     try {
-      // 1. Appel au backend FastAPI
-      const response = await axios.post(
-        'http://localhost:8000/suggest', 
-        { concept },
-        { timeout: 60000 } // Attendre 1 minute (60000ms)
-      );
+      const res = await axios.post(`${API_BASE}/suggest`, { concept });
       
-      const suggestions = response.data.suggestions || [];
-      console.log("Suggestions reçues:", suggestions);
-
-      if (suggestions.length === 0) {
-        alert("L'IA n'a pas pu générer de suggestions pour ce concept.");
-        return;
-      }
-
-      // 2. Création du nœud parent et des nœuds enfants
-      const parentId = `node-${Math.random().toString(36).substring(7)}`;
+      const rootId = concept.toLowerCase();
+      const rootNode = { data: { id: rootId, label: concept.toUpperCase() } };
       
-      const centerNode = { data: { id: parentId, label: concept } };
-      const childNodes = suggestions.map((s: string, index: number) => ({
+      const newNodes = res.data.suggestions.map((s: string) => ({
         data: { 
-          id: `child-${parentId}-${index}`, 
-          label: s 
+          id: s.toLowerCase(), 
+          label: s, 
+          evidence: res.data.evidence_pointers 
         }
       }));
-
-      const newEdges = childNodes.map((node: any) => ({
-        data: { 
-          id: `edge-${parentId}-${node.data.id}`,
-          source: parentId, 
-          target: node.data.id 
-        }
+      
+      const newEdges = res.data.suggestions.map((s: string) => ({
+        data: { source: rootId, target: s.toLowerCase() }
       }));
 
-      const newElements = [centerNode, ...childNodes, ...newEdges];
-      console.log("Ajout au canvas:", newElements);
-
-      // 3. Mise à jour de l'état : on remplace les anciens éléments
-      setElements(newElements);
-
-    } catch (error) {
-      console.error("Erreur lors de la génération:", error);
-      alert("Erreur de génération. Vérifiez la console (F12).");
+      setElements([rootNode, ...newNodes, ...newEdges]);
+    } catch (err) {
+      console.error("Erreur lors de la génération des suggestions:", err);
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   };
 
-  // 4. Effet pour gérer le layout et le redimensionnement automatiquement
-  useEffect(() => {
-    if (cyRef.current && elements.length > 0) {
-      cyRef.current.resize();
-      cyRef.current.layout({ 
-        name: 'cose-bilkent', 
-        animate: true, 
-        fit: true, 
-        padding: 50 
-      }).run();
+  // Agent de Récupération Dynamique : Fetch PubMed en temps réel
+  const fetchFullEvidence = async (pubid: string) => {
+    setFetchingFull(true);
+    setFullArticle("");
+    try {
+      const res = await axios.post(`${API_BASE}/fetch-full-evidence`, { pubid });
+      setFullArticle(res.data.full_content);
+    } catch (err) {
+      setFullArticle("Erreur : Impossible de récupérer l'article complet depuis PubMed.");
+    } finally {
+      setFetchingFull(false);
     }
-  }, [elements]);
+  };
 
   return (
-    <div className="relative w-screen h-screen bg-slate-50 flex flex-col overflow-hidden">
-      {/* Header / Input Panel */}
-      <div className="relative z-[100] p-4 bg-white shadow-md flex gap-2 shrink-0">
-        <input
-          type="text"
-          className="border p-2 rounded w-64 outline-none focus:ring-2 focus:ring-blue-500"
-          placeholder="Entrez un concept (ex: Photosynthèse)"
-          value={concept}
-          onChange={(e) => setConcept(e.target.value)}
-          onKeyPress={(e) => e.key === 'Enter' && handleGenerate()}
-        />
-        <button
-          onClick={handleGenerate}
-          disabled={isLoading}
-          className={`${
-            isLoading ? 'bg-blue-400' : 'bg-blue-600 hover:bg-blue-700'
-          } text-white px-4 py-2 rounded transition`}
-        >
-          {isLoading ? 'Génération...' : 'Générer'}
-        </button>
+    <div className="flex h-screen bg-slate-50 font-sans text-slate-900 overflow-hidden">
+      
+      {/* --- SIDEBAR GAUCHE : CONTRÔLE ET SOURCES --- */}
+      <div className="w-80 bg-white border-r border-slate-200 p-6 flex flex-col shadow-sm z-20">
+        <div className="flex items-center gap-2 mb-8 text-blue-600">
+          <Activity size={24} />
+          <h1 className="font-bold text-xl tracking-tight">MedMind RAG</h1>
+        </div>
+        
+        <div className="space-y-4 mb-8">
+          <label className="text-xs font-bold text-slate-400 uppercase">Explorer un concept</label>
+          <input 
+            className="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+            placeholder="Ex: Hypertension, Myocarditis..."
+            value={concept}
+            onChange={(e) => setConcept(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleGenerate()}
+          />
+          <button 
+            onClick={handleGenerate}
+            disabled={loading}
+            className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold flex items-center justify-center gap-2 hover:bg-blue-700 disabled:bg-slate-300 transition-colors"
+          >
+            {loading ? <Loader2 className="animate-spin" size={20} /> : "Générer la carte"}
+          </button>
+        </div>
+
+        {/* Panneau des preuves RAG (s'affiche au clic sur un nœud) */}
+        {selectedNode?.evidence && (
+          <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
+            <h3 className="font-bold text-sm text-slate-500 uppercase mb-4 flex items-center gap-2">
+              <BookOpen size={16} /> Sources PubMed (Abstracts)
+            </h3>
+            {selectedNode.evidence.map((ev, i) => (
+              <div key={i} className="p-4 bg-slate-50 rounded-xl border border-slate-100 mb-4 hover:border-blue-200 transition-colors">
+                <p className="font-bold text-xs text-blue-800 mb-2 leading-tight">{ev.title}</p>
+                <p className="text-[11px] text-slate-600 line-clamp-3 mb-3 italic">"{ev.preview}"</p>
+                <button 
+                  onClick={() => fetchFullEvidence(ev.pubid)}
+                  className="w-full py-2 bg-white border border-blue-100 text-blue-600 rounded-md text-[10px] font-bold flex items-center justify-center gap-1 hover:bg-blue-50 transition-colors uppercase tracking-wider"
+                >
+                  <ChevronRight size={12} /> Agent Dynamique (Full Text)
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* Canvas */}
-         <div className="flex-grow relative z-0 border-t border-slate-200 bg-white" style={{ minHeight: 500 }}>
-           <CytoscapeComponent
-             elements={elements}
-             style={{ width: '100%', height: '500px' }}
-             stylesheet={style}
-             cy={(cy) => { cyRef.current = cy; }}
-           />
-         </div>
+      {/* --- ZONE CENTRALE : CARTE MENTALE INTERACTIVE --- */}
+      <div className="flex-1 bg-white relative">
+        <CytoscapeComponent
+          elements={elements}
+          style={{ width: '100%', height: '100%' }}
+          layout={layout}
+          stylesheet={style}
+          cy={(cy: cytoscape.Core) => {
+            cyRef.current = cy;
+            cy.on('tap', 'node', (evt: any) => {
+              const node = evt.target;
+              setSelectedNode({ 
+                id: node.id(), 
+                evidence: node.data('evidence') 
+              });
+            });
+          }}
+        />
+        {elements.length === 0 && !loading && (
+          <div className="absolute inset-0 flex items-center justify-center text-slate-300 pointer-events-none">
+            <p className="text-lg">Entrez un concept pour commencer l'exploration</p>
+          </div>
+        )}
+      </div>
+
+      {/* --- PANNEAU DROIT : AGENT DE RÉCUPÉRATION LIVE --- */}
+      {(fullArticle || fetchingFull) && (
+        <div className="w-[450px] bg-white border-l border-slate-200 p-8 overflow-y-auto shadow-2xl z-30 animate-in slide-in-from-right duration-300">
+          <div className="flex justify-between items-center mb-8">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+              <h2 className="font-bold text-blue-600 uppercase tracking-widest text-sm">Récupération Live NCBI</h2>
+            </div>
+            <button 
+              onClick={() => setFullArticle("")} 
+              className="p-2 hover:bg-slate-100 rounded-full transition-colors"
+            >
+              <X size={20} className="text-slate-400" />
+            </button>
+          </div>
+
+          {fetchingFull ? (
+            <div className="flex flex-col items-center justify-center py-24 text-slate-400">
+              <Loader2 className="animate-spin mb-4" size={32} />
+              <p className="text-sm font-medium">Interrogation des serveurs PubMed...</p>
+              <p className="text-xs mt-2">Extraction du texte intégral en cours</p>
+            </div>
+          ) : (
+            <div className="animate-in fade-in duration-500">
+              <div className="bg-blue-50 border-l-4 border-blue-500 p-4 mb-6">
+                <p className="text-blue-700 text-[11px] font-medium leading-relaxed">
+                  NOTE : Ce contenu est récupéré dynamiquement depuis la base de données officielle. 
+                  Il ne consomme aucun espace de stockage local permanent.
+                </p>
+              </div>
+              <div className="prose prose-slate">
+                <pre className="whitespace-pre-wrap text-[12px] leading-relaxed text-slate-700 font-mono bg-slate-50 p-6 rounded-xl border border-slate-100">
+                  {fullArticle}
+                </pre>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

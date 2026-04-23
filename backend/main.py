@@ -2,129 +2,136 @@ import json
 import httpx
 import faiss
 import pickle
-import numpy as np
 import uvicorn
-from pathlib import Path
-from typing import List
-from fastapi import FastAPI, HTTPException
+import logging
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from Bio import Entrez
+from typing import List
 
-# LangChain imports
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.documents import Document
-from langchain_community.docstore.in_memory import InMemoryDocstore
+# Configuration des logs pour voir ce qui se passe dans la console
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Smart Medical Mind Map API")
+app = FastAPI(title="Smart Medical Agent API")
 
-# --- 1. CORS CONFIGURATION ---
+# --- 1. CONFIGURATION CORS RENFORCÉE ---
+# On autorise explicitement les ports courants de Vite (5173, 5174, etc.)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174"],
+    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- 2. DATA MODELS ---
+# Configuration Entrez (PubMed)
+Entrez.email = "votre_email@example.com" 
+
 class ConceptRequest(BaseModel):
     concept: str
 
-class SuggestionResponse(BaseModel):
-    parent: str
-    suggestions: List[str]
+class EvidenceRequest(BaseModel):
+    pubid: str
 
-# --- 3. CONSTANTS ---
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "phi"  
-
-# --- 4. RAG SETUP ---
-embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-def load_vectorstore():
-    index_path = Path("med_knowledge.index")
-    pkl_path = Path("med_texts.pkl")
+# --- 2. CHARGEMENT DU RAG ---
+logger.info("Initialisation du RAG...")
+try:
+    embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    index = faiss.read_index("med_knowledge.index")
+    with open("med_texts.pkl", "rb") as f:
+        docs = pickle.load(f)
     
-    if not index_path.exists() or not pkl_path.exists():
-        print("⚠️ Fichiers RAG manquants. Mode sans connaissances activé.")
-        return None
+    from langchain_community.docstore.in_memory import InMemoryDocstore
+    docstore = InMemoryDocstore({str(i): d for i, d in enumerate(docs)})
+    id_map = {i: str(i) for i in range(len(docs))}
+    
+    from langchain_community.vectorstores import FAISS
+    vectorstore = FAISS(embeddings_model, index, docstore, id_map)
+    logger.info("✅ RAG prêt et index chargé.")
+except Exception as e:
+    logger.error(f"❌ Erreur critique chargement RAG: {e}")
+    vectorstore = None
 
-    try:
-        # Charger l'index FAISS natif
-        faiss_index = faiss.read_index(str(index_path))
-        # Charger les textes
-        with open(pkl_path, "rb") as f:
-            texts = pickle.load(f)
-        
-        # Reconstruire le vectorstore LangChain à partir de l'index existant
-        docstore = InMemoryDocstore({
-            str(i): Document(page_content=text) for i, text in enumerate(texts)
-        })
-        index_to_docstore_id = {i: str(i) for i in range(len(texts))}
-        
-        return FAISS(
-            embedding_function=embeddings_model,
-            index=faiss_index,
-            docstore=docstore,
-            index_to_docstore_id=index_to_docstore_id
-        )
-    except Exception as e:
-        print(f"❌ Erreur lors de l'initialisation du VectorStore: {e}")
-        return None
+# --- 3. ROUTES ---
 
-vectorstore = load_vectorstore()
-
-# --- 5. ROUTES ---
-
-@app.post("/suggest", response_model=SuggestionResponse)
+@app.post("/suggest")
 async def get_suggestions(request: ConceptRequest):
-    context = ""
-    if vectorstore:
+    logger.info(f"Requête reçue pour le concept : {request.concept}")
+    
+    if not vectorstore:
+        raise HTTPException(status_code=500, detail="Système de recherche non disponible.")
+
+    # A. Recherche sémantique
+    try:
+        relevant_docs = vectorstore.similarity_search(request.concept, k=2)
+        evidences = [
+            {
+                "title": d.metadata.get("title", "Article PubMed"),
+                "pubid": str(d.metadata.get("pubid", "")),
+                "url": d.metadata.get("pdf_link", ""),
+                "preview": d.page_content[:200] + "..."
+            } for d in relevant_docs
+        ]
+    except Exception as e:
+        logger.error(f"Erreur recherche FAISS: {e}")
+        evidences = []
+
+    # B. Appel Ollama avec gestion du Timeout
+    context_text = evidences[0]['preview'] if evidences else "Pas de contexte."
+    prompt = f"""
+    [INST] Tu es un assistant médical. Basé sur ce contexte : {context_text}
+    Donne 5 concepts liés à '{request.concept}' pour une carte mentale.
+    Réponds UNIQUEMENT en JSON: {{"subtopics": ["concept1", "concept2", "concept3", "concept4", "concept5"]}} [/INST]
+    """
+
+    # Utilisation d'un timeout infini pour éviter le crash ReadTimeout
+    async with httpx.AsyncClient(timeout=None) as client:
         try:
-            # Recherche de documents pertinents
-            docs = vectorstore.similarity_search(request.concept, k=3)
-            context = "\n".join([doc.page_content for doc in docs])
-        except Exception as e:
-            print(f"Erreur de recherche RAG: {e}")
-
-    # Prompt optimisé pour PHI (très sensible au format)
-    prompt = f"""Instructions: You are a medical expert. 
-Using the context below, provide 5 subtopics for the concept '{request.concept}'.
-
-Context:
-{context}
-
-Response must be ONLY a valid JSON object.
-Format: {{"subtopics": ["topic1", "topic2", "topic3", "topic4", "topic5"]}}"""
-
-    async with httpx.AsyncClient() as client:
-        try:
+            logger.info("Appel à Ollama en cours...")
             response = await client.post(
-                OLLAMA_URL,
+                "http://localhost:11434/api/generate",
                 json={
-                    "model": MODEL_NAME,
+                    "model": "mistral",
                     "prompt": prompt,
                     "format": "json",
                     "stream": False
-                },
-                timeout=60.0
+                }
             )
-            response.raise_for_status()
-            raw_response = response.json().get("response", "{}")
             
-            # Parsing sécurisé
-            data = json.loads(raw_response)
-            suggestions = data.get("subtopics", [])
-            
-            return {
-                "parent": request.concept,
-                "suggestions": suggestions[:5]
-            }
+            if response.status_code == 200:
+                result = response.json()
+                ai_output = json.loads(result.get("response", "{}"))
+                return {
+                    "parent": request.concept,
+                    "suggestions": ai_output.get("subtopics", []),
+                    "evidence_pointers": evidences
+                }
+            else:
+                raise Exception(f"Ollama a répondu avec le code {response.status_code}")
 
         except Exception as e:
-            print(f"Error: {e}")
-            raise HTTPException(status_code=500, detail="Erreur interne du serveur ou Ollama.")
+            logger.warning(f"Ollama indisponible ou trop lent : {e}")
+            # Fallback pour ne pas bloquer le frontend
+            return {
+                "parent": request.concept,
+                "suggestions": [f"{request.concept} - Études", "Diagnostic", "Pathologie", "Traitements", "Prévention"],
+                "evidence_pointers": evidences,
+                "note": "Suggestions générées par mode secours (IA indisponible)."
+            }
+
+@app.post("/fetch-full-evidence")
+async def fetch_full_evidence(request: EvidenceRequest):
+    try:
+        handle = Entrez.efetch(db="pubmed", id=request.pubid, rettype="abstract", retmode="text")
+        full_text = handle.read()
+        handle.close()
+        return {"pubid": request.pubid, "full_content": full_text}
+    except Exception as e:
+        logger.error(f"Erreur PubMed: {e}")
+        raise HTTPException(status_code=500, detail="Impossible de joindre PubMed.")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    from langchain_huggingface import HuggingFaceEmbeddings # Import ici pour éviter les erreurs au démarrage
+    uvicorn.run(app, host="127.0.0.1", port=8000)
