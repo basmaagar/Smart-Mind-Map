@@ -16,4 +16,7 @@ dist/
 
 # Environment & IDE
 .env
+.env.local
+.env.*
+!.env.example
 .vscode/

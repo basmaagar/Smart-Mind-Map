@@ -18,6 +18,8 @@ services:
     environment:
       - DATABASE_URL=bolt://db:7687
       - OLLAMA_HOST=http://host.docker.internal:11434 # Connects to Ollama on your host machine
+    env_file:
+      - ./backend/.env
     depends_on:
       - db
 
