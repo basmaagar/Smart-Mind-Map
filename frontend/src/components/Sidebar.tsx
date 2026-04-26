@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import axios from 'axios';
 
 interface SidebarProps {
@@ -7,123 +7,94 @@ interface SidebarProps {
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ data, onClose }) => {
-  // Function to fetch the full abstract from the backend
   const handleFetchFullText = async (pubid: string) => {
     try {
       const res = await axios.post("http://127.0.0.1:8000/fetch-full-evidence", { pubid });
       if (res.data.full_content) {
-        alert(`PubMed Abstract (ID: ${pubid}):\n\n${res.data.full_content}`);
-      } else {
-        alert("Full content not found.");
+        alert(`PUBMED_DATA_DUMP [ID: ${pubid}]:\n\n${res.data.full_content}`);
       }
     } catch (err) {
-      console.error("Error fetching full text:", err);
-      alert("Failed to retrieve data from PubMed.");
+      console.error("Link error:", err);
     }
   };
 
-  const [width, setWidth] = useState(320);
-  const [isResizing, setIsResizing] = useState(false);
-
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isResizing) return;
-      // Calculate new width from the right edge
-      const newWidth = document.body.clientWidth - e.clientX;
-      if (newWidth > 200 && newWidth < 800) {
-        setWidth(newWidth);
-      }
-    };
-    const handleMouseUp = () => setIsResizing(false);
-
-    if (isResizing) {
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
-    }
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isResizing]);
-
-  console.log("Sidebar rendering with data:", data);
-
-  // If no node is selected, the sidebar remains hidden
-  if (!data) return null;
-
   return (
-    <div 
-      style={{ width: `${width}px` }}
-      className="fixed top-0 right-0 h-full bg-gray-900 border-l-4 border-red-600 flex flex-col z-[9999] shadow-[0_0_50px_rgba(0,0,0,0.8)]"
-    >
-      {/* Resizer Handle */}
-      <div 
-        onMouseDown={() => setIsResizing(true)}
-        className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-500 z-50 transition-colors"
-        title="Drag to resize"
-      />
-
-      {/* Sidebar Header */}
-      <div className="p-4 border-b border-gray-800 bg-gray-900/50 backdrop-blur-sm sticky top-0 z-10 flex justify-between items-start">
-        <div>
-          <h2 className="text-xl font-bold text-green-400 flex items-center gap-2">
-            <span className="text-sm">🔬</span> Medical Evidence
-          </h2>
-          <p className="text-[10px] text-gray-500 uppercase tracking-widest mt-1">
-            {data.label}
-          </p>
+    <aside style={{ width: '320px', borderLeft: '1px solid #111', display: 'flex', flexDirection: 'column', backgroundColor: 'black', overflow: 'hidden', flexShrink: 0 }}>
+      {/* Panel Header */}
+      <div style={{ padding: '24px', borderBottom: '1px solid #111', backgroundColor: '#050505' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+          <span style={{ fontSize: '10px', fontWeight: 'bold', color: '#00ff00', letterSpacing: '0.3em', textTransform: 'uppercase' }}>Intelligence</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: 'rgba(0, 255, 0, 0.1)', padding: '2px 8px', borderRadius: '2px', border: '1px solid rgba(0, 255, 0, 0.2)' }}>
+             <div style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#00ff00' }} />
+             <span style={{ fontSize: '8px', fontWeight: 'bold', color: '#00ff00', textTransform: 'uppercase' }}>Live</span>
+          </div>
         </div>
-        <button 
-          onClick={onClose} 
-          className="text-gray-500 hover:text-white p-1 rounded-md hover:bg-gray-800 transition-colors"
-          title="Close Sidebar"
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-        </button>
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          <span style={{ fontSize: '10px', fontWeight: 'bold', color: '#444', textTransform: 'uppercase', letterSpacing: '0.1em' }}>RAG_ENGINE_ACTIVE</span>
+          <span style={{ fontSize: '12px', fontWeight: 'bold', color: 'white', textTransform: 'uppercase', marginTop: '8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{data?.label || "IDLE_STATE"}</span>
+        </div>
       </div>
 
-      {/* Evidence List */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {data.evidence && data.evidence.length > 0 ? (
-          data.evidence.map((item, index) => (
-            <div 
-              key={index} 
-              onClick={() => handleFetchFullText(item.pubid)}
-              className="group p-4 bg-gray-800/50 rounded-xl border border-gray-700 hover:border-green-500/50 hover:bg-gray-800 transition-all cursor-pointer shadow-sm"
-            >
-              <div className="flex justify-between items-start mb-2">
-                <span className="text-[10px] font-mono text-gray-500 bg-black px-2 py-0.5 rounded">
-                  SOURCE #{index + 1}
-                </span>
-                <span className="text-blue-400 text-xs font-semibold group-hover:underline">
-                  View Abstract
-                </span>
-              </div>
-              
-              <h3 className="text-sm font-medium text-gray-200 leading-snug mb-3">
-                {item.title}
-              </h3>
-              
-              <div className="flex items-center gap-2">
-                <div className="h-1.5 w-1.5 rounded-full bg-green-500"></div>
-                <span className="text-xs text-gray-500 font-mono">PMID: {item.pubid}</span>
-              </div>
+      {/* Main Content */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '24px' }}>
+        {data ? (
+          <>
+            <div style={{ marginBottom: '32px' }}>
+              <h3 style={{ fontSize: '9px', fontWeight: 'bold', color: '#222', textTransform: 'uppercase', letterSpacing: '0.4em', marginBottom: '16px' }}>Data Sources</h3>
+              {data.evidence && data.evidence.length > 0 ? (
+                data.evidence.map((item, idx) => (
+                  <div key={idx} style={{ marginBottom: '12px', padding: '16px', backgroundColor: '#050505', border: '1px solid #111' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#00ff00', marginBottom: '12px' }}>
+                       <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                       <span style={{ fontSize: '9px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Source_00{idx + 1}: PubMed</span>
+                    </div>
+                    <p style={{ fontSize: '11px', fontWeight: 'bold', color: 'white', lineHeight: '1.5', textTransform: 'uppercase', marginBottom: '8px' }}>
+                      {item.title || "Research Publication"}
+                    </p>
+                    <p style={{ fontSize: '10px', color: '#444', lineHeight: '1.4', textTransform: 'uppercase', marginBottom: '12px' }}>
+                      {item.snippet || "No additional metadata available in current session."}
+                    </p>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px', paddingTop: '8px', borderTop: '1px solid #111' }}>
+                       <span style={{ fontSize: '8px', fontWeight: 'bold', color: '#00ff00', textTransform: 'uppercase' }}>PMID: {item.pubid}</span>
+                       <button 
+                         onClick={() => handleFetchFullText(item.pubid)}
+                         style={{ background: 'none', border: 'none', fontSize: '8px', fontWeight: 'bold', color: '#007fff', textTransform: 'uppercase', cursor: 'pointer' }}
+                       >
+                         View_Abstract
+                       </button>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div style={{ fontSize: '10px', color: '#222', textTransform: 'uppercase', fontWeight: 'bold', fontStyle: 'italic', padding: '40px 0', textAlign: 'center' }}>
+                   No specific evidence links found.
+                </div>
+              )}
             </div>
-          ))
+
+            <div style={{ marginBottom: '16px' }}>
+               <h3 style={{ fontSize: '9px', fontWeight: 'bold', color: '#222', textTransform: 'uppercase', letterSpacing: '0.4em', marginBottom: '16px' }}>RAG Sources</h3>
+               <div style={{ padding: '16px', border: '1px solid #111', backgroundColor: '#050505', opacity: 0.3 }}>
+                  <span style={{ fontSize: '9px', fontWeight: 'bold', color: '#444', textTransform: 'uppercase' }}>Entries Waiting in Queue...</span>
+               </div>
+            </div>
+          </>
         ) : (
-          <div className="text-gray-500 text-sm italic text-center mt-10">
-            No specific sources linked to this node.
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', opacity: 0.1 }}>
+             <div style={{ width: '80px', height: '80px', border: '2px dashed #444', borderRadius: '2px', marginBottom: '16px' }} />
+             <span style={{ fontSize: '10px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5em' }}>Waiting for Node Select...</span>
           </div>
         )}
       </div>
 
-      {/* Sidebar Footer */}
-      <div className="p-4 border-t border-gray-800 bg-gray-900/80">
-        <p className="text-[10px] text-gray-600 italic leading-tight">
-          Double-click a node to expand the knowledge graph based on these references.
-        </p>
+      {/* Panel Footer */}
+      <div style={{ padding: '24px', borderTop: '1px solid #111', backgroundColor: 'black' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '8px', fontWeight: 'bold', color: '#222', textTransform: 'uppercase', letterSpacing: '0.4em' }}>
+           <span>IO_PROCESS_01</span>
+           <span>0x7f3e2</span>
+        </div>
       </div>
-    </div>
+    </aside>
   );
 };
 

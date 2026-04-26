@@ -49,61 +49,81 @@ const MindMap: React.FC<MindMapProps> = ({
         {
           selector: 'node',
           style: {
-            'background-color': '#3b82f6',
+            'background-color': '#007fff',
             'label': 'data(label)',
             'color': '#ffffff',
             'text-valign': 'center',
             'text-halign': 'center',
-            'font-size': '12px',
+            'font-size': '10px',
+            'font-family': 'JetBrains Mono, monospace',
             'font-weight': 'bold',
-            'width': '180px',
-            'height': '60px',
-            'shape': 'round-rectangle',
+            'text-transform': 'uppercase',
             'text-wrap': 'wrap',
-            'text-max-width': '160px',
-            'border-width': 2,
-            'border-color': '#1d4ed8'
-          }
+            'text-max-width': '120px',
+            'line-height': 1.1,
+            'width': '140px',
+            'height': '45px',
+            'shape': 'round-rectangle',
+            'corner-radius': '4px',
+            'border-width': 0,
+            'overlay-opacity': 0,
+            'shadow-blur': 15,
+            'shadow-color': '#007fff',
+            'shadow-opacity': 0.4
+          } as any
         },
         {
           selector: 'edge',
           style: {
-            'width': 8,
-            'line-color': '#ff0000',
-            'target-arrow-color': '#ff0000',
+            'width': 3,
+            'line-color': '#444',
+            'line-style': 'solid',
+            'curve-style': 'bezier',
             'target-arrow-shape': 'triangle',
-            'curve-style': 'straight',
-            'line-opacity': 1,
-            'arrow-scale': 1.5,
-            'target-distance-from-node': 5,
-            'z-index': 10
-          }
+            'target-arrow-color': '#444',
+            'arrow-scale': 1,
+            'opacity': 0.8
+          } as any
+        },
+        {
+          selector: 'edge[?isValidated]',
+          style: {
+            'line-color': '#ffffff',
+            'target-arrow-color': '#ffffff',
+            'width': 4,
+            'shadow-blur': 15,
+            'shadow-color': '#ffffff',
+            'opacity': 1
+          } as any
         },
         {
           selector: 'node:selected',
           style: {
-            'background-color': '#10b981',
-            'border-color': '#059669'
-          }
+            'border-width': 2,
+            'border-color': '#ffffff',
+            'background-color': '#00bfff',
+            'shadow-blur': 30,
+            'shadow-opacity': 0.8
+          } as any
         },
         {
           selector: '.suggestion',
           style: {
-            'background-color': '#374151',
-            'border-color': '#9ca3af',
+            'background-color': '#050505',
+            'border-width': 1,
+            'border-color': '#007fff',
             'border-style': 'dashed',
-            'color': '#d1d5db',
-            'border-width': 2
-          }
+            'color': '#007fff',
+            'opacity': 0.8
+          } as any
         },
         {
           selector: '.suggestion-edge',
           style: {
-            'line-color': '#6b7280',
-            'target-arrow-color': '#6b7280',
             'line-style': 'dashed',
-            'width': 4
-          }
+            'opacity': 0.4,
+            'line-color': '#444'
+          } as any
         }
       ],
       wheelSensitivity: 0.2
@@ -185,7 +205,12 @@ const MindMap: React.FC<MindMapProps> = ({
 
   // 2. Update elements incrementally
   useEffect(() => {
-    if (!cyInstance || !elements || elements.length === 0) return;
+    if (!cyInstance) return;
+
+    if (!elements || elements.length === 0) {
+      cyInstance.elements().remove();
+      return;
+    }
 
     // Save old positions to avoid layout jumping
     const oldPositions = new Map();
@@ -208,24 +233,23 @@ const MindMap: React.FC<MindMapProps> = ({
     cyInstance.layout({
       name: 'cose',
       animate: true,
-      animationDuration: 800,
-      randomize: false, // Extremely important to stop glitching
-      nodeRepulsion: () => 1000000,
-      idealEdgeLength: () => 150,
-      nodeOverlap: 20,
+      animationDuration: 1000,
+      randomize: false,
+      nodeRepulsion: () => 8000000, // Significantly increased repulsion
+      idealEdgeLength: () => 200,
+      nodeOverlap: 40,
       refresh: 20,
       fit: true,
-      padding: 50
+      padding: 100
     }).run();
 
   }, [elements, cyInstance]);
 
   return (
-    <div className="relative w-full h-full">
+    <div style={{ position: 'relative', width: '100%', height: '100%', backgroundColor: 'black' }}>
       <div
         ref={containerRef}
-        className="w-full h-full bg-black"
-        style={{ minHeight: '100%', cursor: 'grab' }}
+        style={{ width: '100%', height: '100%', cursor: 'grab' }}
       />
       
       {/* Floating Action Menu */}
@@ -233,34 +257,34 @@ const MindMap: React.FC<MindMapProps> = ({
         <>
           {/* TOP MENU: Actions */}
           <div 
-            className="absolute z-50 transform -translate-x-1/2 -translate-y-full pointer-events-auto"
+            className="absolute z-50 transform -translate-x-1/2 -translate-y-full pb-6 pointer-events-auto"
             style={{ 
               left: activeMenu.x, 
-              top: activeMenu.y - (activeMenu.renderedHeight / 2) - 12
+              top: activeMenu.y - (activeMenu.renderedHeight / 2) - 8
             }}
           >
-            <div className="bg-gray-900/95 backdrop-blur-lg border border-white/10 rounded-xl shadow-2xl flex items-center gap-2 p-1.5 ring-1 ring-black/50 overflow-hidden whitespace-nowrap">
+            <div className="bg-black border border-[#222] flex items-center gap-1 p-1 shadow-[0_0_20px_rgba(0,0,0,1)]">
               {activeMenu.isSuggestion ? (
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1">
                   <button 
                     onClick={() => {
                       onAcceptSuggestion?.(activeMenu.suggestionObj);
                       setActiveMenu(null);
                     }}
-                    className="p-2.5 rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500 hover:text-white transition-all shadow-sm flex items-center justify-center"
-                    title="Accept Suggestion"
+                    className="w-10 h-10 bg-green-500 flex items-center justify-center text-black hover:bg-green-400 transition-all shadow-[0_0_15px_rgba(0,255,0,0.4)]"
+                    title="Accept"
                   >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" d="M5 13l4 4L19 7"></path></svg>
                   </button>
                   <button 
                     onClick={() => {
                       onDismissSuggestion?.(activeMenu.suggestionObj);
                       setActiveMenu(null);
                     }}
-                    className="p-2.5 rounded-lg bg-rose-500/20 text-rose-400 hover:bg-rose-500 hover:text-white transition-all shadow-sm flex items-center justify-center"
-                    title="Dismiss Suggestion"
+                    className="w-10 h-10 bg-rose-500 flex items-center justify-center text-white hover:bg-rose-400 transition-all shadow-[0_0_15px_rgba(255,0,0,0.4)]"
+                    title="Dismiss"
                   >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" d="M6 18L18 6M6 6l12 12"></path></svg>
                   </button>
                 </div>
               ) : (
@@ -269,11 +293,10 @@ const MindMap: React.FC<MindMapProps> = ({
                     onExploreNode?.(activeMenu.label);
                     setActiveMenu(null);
                   }}
-                  className="p-2.5 rounded-lg bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500 hover:text-white transition-all shadow-sm flex items-center gap-2 px-4"
-                  title="Explore Subtopics"
+                  className="flex items-center gap-2 px-5 py-2 bg-blue-500/10 text-blue-500 border border-blue-500/30 hover:bg-blue-500 hover:text-white transition-all text-[9px] font-bold uppercase tracking-[0.2em]"
                 >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-                  <span className="text-sm font-medium">Explore</span>
+                  <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                  Init_Expansion
                 </button>
               )}
             </div>
@@ -284,21 +307,19 @@ const MindMap: React.FC<MindMapProps> = ({
             className="absolute z-50 transform -translate-x-1/2 pointer-events-auto"
             style={{ 
               left: activeMenu.x, 
-              top: activeMenu.y + (activeMenu.renderedHeight / 2) + 12
+              top: activeMenu.y + (activeMenu.renderedHeight / 2) + 8
             }}
           >
-            <div className="bg-gray-900/95 backdrop-blur-lg border border-white/10 rounded-xl shadow-2xl flex items-center gap-2 p-1.5 ring-1 ring-black/50 overflow-hidden whitespace-nowrap">
+            <div className="bg-black border border-[#222] p-1">
               <button 
                 onClick={(e) => {
                   e.stopPropagation();
-                  console.log("Evidence button clicked for node:", activeMenu.label);
                   onNodeClick(activeMenu.nodeData);
                 }}
-                className="p-2.5 rounded-lg bg-sky-500/20 text-sky-400 hover:bg-sky-500 hover:text-white transition-all shadow-sm flex items-center gap-2 px-4"
-                title="View Evidence"
+                className="flex items-center gap-2 px-5 py-2 bg-[#050505] text-[#444] border border-[#111] hover:border-blue-500/50 hover:text-blue-500 transition-all text-[9px] font-bold uppercase tracking-[0.2em]"
               >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                <span className="text-sm font-medium">Evidence</span>
+                <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                Access_Evidence
               </button>
             </div>
           </div>

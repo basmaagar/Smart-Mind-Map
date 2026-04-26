@@ -35,48 +35,82 @@ const ProjectMenu: React.FC<ProjectMenuProps> = ({
       {/* Dark Overlay when menu is open */}
       {isOpen && (
         <div 
-          className="fixed inset-0 bg-black/60 z-40 backdrop-blur-sm transition-opacity"
+          style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0, 0, 0, 0.7)', zIndex: 60, backdropFilter: 'blur(4px)' }}
           onClick={() => setIsOpen(false)}
         />
       )}
 
       {/* Sidebar Drawer */}
-      <div className={`fixed top-0 left-0 h-full bg-gray-900 w-72 z-50 transform transition-transform duration-300 ease-in-out border-r border-gray-800 ${
-        isOpen ? 'translate-x-0' : '-translate-x-full'
-      }`}>
+      <div style={{ 
+        position: 'fixed', 
+        top: 0, 
+        left: 0, 
+        height: '100%', 
+        width: '320px', 
+        zIndex: 70, 
+        backgroundColor: 'black', 
+        borderRight: '1px solid #111',
+        transform: isOpen ? 'translateX(0)' : 'translateX(-100%)',
+        transition: 'transform 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+        display: 'flex',
+        flexDirection: 'column'
+      }}>
         
-        <div className="flex flex-col h-full">
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           {/* Header */}
-          <div className="p-6 border-b border-gray-800 flex justify-between items-center">
-            <h2 className="text-xl font-bold text-blue-400">MedMind OS</h2>
+          <div style={{ padding: '24px', borderBottom: '1px solid #111', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#050505' }}>
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              <h2 style={{ fontSize: '12px', fontWeight: 'bold', color: '#007fff', textTransform: 'uppercase', letterSpacing: '0.2em', margin: 0 }}>Terminal_History</h2>
+              <span style={{ fontSize: '8px', color: '#333', textTransform: 'uppercase', fontWeight: 'bold', marginTop: '4px' }}>Session_Logs_Local</span>
+            </div>
             <button 
               onClick={() => setIsOpen(false)}
-              className="text-gray-400 hover:text-white transition-colors"
+              style={{ background: 'none', border: 'none', color: '#444', cursor: 'pointer', fontSize: '10px', fontWeight: 'bold' }}
             >
-              <span className="text-2xl">✕</span>
+              [CLOSE]
             </button>
           </div>
 
           {/* Action Button */}
-          <div className="p-6">
+          <div style={{ padding: '24px' }}>
             <button 
               onClick={() => {
                 onNewProject();
                 setIsOpen(false);
               }}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-900/20"
+              style={{ 
+                width: '100%', 
+                backgroundColor: 'black', 
+                color: '#00ff00', 
+                border: '1px solid #00ff00', 
+                padding: '12px', 
+                fontSize: '10px', 
+                fontWeight: 'bold', 
+                textTransform: 'uppercase', 
+                letterSpacing: '0.1em',
+                cursor: 'pointer',
+                transition: 'all 0.2s'
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = '#00ff00';
+                e.currentTarget.style.color = 'black';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = 'black';
+                e.currentTarget.style.color = '#00ff00';
+              }}
             >
-              <span>+</span> New Exploration
+              + Initiate_New_Sequence
             </button>
           </div>
 
           {/* History List */}
-          <div className="flex-1 overflow-y-auto px-4 pb-6">
-            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4 px-2">
-              Exploration History
+          <div style={{ flex: 1, overflowY: 'auto', padding: '0 24px 24px' }}>
+            <h3 style={{ fontSize: '9px', fontWeight: 'bold', color: '#222', textTransform: 'uppercase', letterSpacing: '0.2em', marginBottom: '16px' }}>
+              Stored_Sequences
             </h3>
             
-            <div className="space-y-1">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
               {projects.length > 0 ? (
                 projects.map((p) => (
                   <button
@@ -85,22 +119,51 @@ const ProjectMenu: React.FC<ProjectMenuProps> = ({
                       onSelectProject(p.id);
                       setIsOpen(false);
                     }}
-                    className="w-full text-left p-3 rounded-md text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-all truncate border border-transparent hover:border-gray-700"
+                    style={{ 
+                      width: '100%', 
+                      textAlign: 'left', 
+                      padding: '12px', 
+                      backgroundColor: '#050505', 
+                      color: '#444', 
+                      border: '1px solid #111', 
+                      fontSize: '10px', 
+                      fontWeight: 'bold', 
+                      textTransform: 'uppercase',
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      transition: 'all 0.2s'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.borderColor = '#007fff';
+                      e.currentTarget.style.color = 'white';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.borderColor = '#111';
+                      e.currentTarget.style.color = '#444';
+                    }}
                   >
-                    {p.title}
+                    {p.title || "Untitled_Sequence"}
                   </button>
                 ))
               ) : (
-                <p className="text-xs text-gray-600 italic px-2">No projects found.</p>
+                <div style={{ padding: '40px 0', textAlign: 'center', opacity: 0.3 }}>
+                   <p style={{ fontSize: '10px', fontStyle: 'italic', color: '#333' }}>No_History_Found</p>
+                </div>
               )}
             </div>
           </div>
 
           {/* Footer Info */}
-          <div className="p-4 border-t border-gray-800">
-            <p className="text-[10px] text-gray-600 text-center uppercase tracking-tighter">
-              Kernel v1.0.4 - Medical Research OS
-            </p>
+          <div style={{ padding: '24px', borderTop: '1px solid #111', backgroundColor: 'black' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '8px', color: '#222', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.2em' }}>
+              <span>Logs_v1.0</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <span style={{ width: '4px', height: '4px', borderRadius: '50%', backgroundColor: '#00ff00' }} />
+                Kernel_Ready
+              </span>
+            </div>
           </div>
         </div>
       </div>
