@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import axios from 'axios';
 import MindMap from './components/MindMap';
 import Sidebar from './components/Sidebar';
@@ -6,15 +6,17 @@ import ProjectMenu from './components/ProjectMenu';
 
 const API_BASE = "http://127.0.0.1:8000";
 
-interface Evidence {
-  title: string;
-  pubid: string;
+interface Suggestion {
+  name: string;
+  evidence: string;
+  parent: string;
 }
 
 const App: React.FC = () => {
   const [elements, setElements] = useState<any[]>([]);
+  const [pendingSuggestions, setPendingSuggestions] = useState<Suggestion[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
-  const [selectedEvidence, setSelectedEvidence] = useState<Evidence[]>([]);
+  const [selectedNode, setSelectedNode] = useState<{ id: string, label: string, evidence: any[] } | null>(null);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [searchInput, setSearchInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -41,11 +43,19 @@ const App: React.FC = () => {
         project_id: currentProjectId // Sends null if it's a new project
       });
 
-      const { project_id } = res.data;
+      const { project_id, parent, suggestions } = res.data;
       
-      // Update project ID and refresh the visual graph
+      // Update project ID and refresh the visual graph to show the root
       if (!currentProjectId) setCurrentProjectId(project_id);
       await fetchGraph(project_id);
+      
+      // Add suggestions to pending state
+      const newSuggestions = suggestions.map((s: any) => ({
+        ...s,
+        evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
+        parent: parent
+      }));
+      setPendingSuggestions(prev => [...prev, ...newSuggestions]);
       
       setSearchInput(""); // Clear input after generation
     } catch (err) {
@@ -59,9 +69,65 @@ const App: React.FC = () => {
   const handleNewProject = () => {
     setElements([]);
     setCurrentProjectId(null);
-    setSelectedEvidence([]);
+    setSelectedNode(null);
     setSearchInput("");
+    setPendingSuggestions([]);
   };
+
+  // 4. Handle accepting a suggestion
+  const handleAcceptSuggestion = async (sug: Suggestion) => {
+    if (!currentProjectId) return;
+    try {
+      await axios.post(`${API_BASE}/accept-suggestion`, {
+        project_id: currentProjectId,
+        parent_concept: sug.parent,
+        child_concept: sug.name,
+        evidence: typeof sug.evidence === 'string' ? sug.evidence : JSON.stringify(sug.evidence)
+      });
+      // Remove from pending
+      setPendingSuggestions(prev => prev.filter(s => s.name !== sug.name || s.parent !== sug.parent));
+      // Refresh graph
+      await fetchGraph(currentProjectId);
+    } catch (err) {
+      console.error("Error accepting suggestion:", err);
+    }
+  };
+
+  // 5. Handle dismissing a suggestion
+  const handleDismissSuggestion = (sug: Suggestion) => {
+    setPendingSuggestions(prev => prev.filter(s => s.name !== sug.name || s.parent !== sug.parent));
+  };
+
+  // 6. Handle recursive exploration
+  const handleExploreNode = (label: string) => {
+    handleGenerate(label);
+  };
+
+  // Combine real elements and ghost suggestions
+  const allElements = [
+    ...elements,
+    ...pendingSuggestions.map(sug => ({
+      group: 'nodes',
+      classes: 'suggestion',
+      data: { 
+        id: `sug-${sug.name.toLowerCase().trim()}`, 
+        label: sug.name, 
+        isSuggestion: true, 
+        evidence: sug.evidence, 
+        parentId: sug.parent,
+        suggestionObj: sug
+      }
+    })),
+    ...pendingSuggestions.map(sug => ({
+      group: 'edges',
+      classes: 'suggestion-edge',
+      data: { 
+        id: `edge-sug-${sug.parent.toLowerCase().trim()}-${sug.name.toLowerCase().trim()}`, 
+        source: sug.parent.toLowerCase().trim(), 
+        target: `sug-${sug.name.toLowerCase().trim()}` 
+      }
+    }))
+  ];
 
   return (
     <div className="flex h-screen bg-black text-white overflow-hidden font-sans">
@@ -73,14 +139,9 @@ const App: React.FC = () => {
         onNewProject={handleNewProject}
       />
 
-      {/* MIDDLE: Main Exploration Area */}
-      <main className="flex-1 flex flex-col relative min-w-0">
-        <header className="p-4 border-b border-gray-800 flex items-center gap-4 bg-black/50 backdrop-blur-md z-10">
-          <button 
-            onClick={() => setIsMenuOpen(true)} 
-            className="p-2 hover:bg-gray-800 rounded-full transition-colors"
-            title="Open Projects"
-          >
+      <div className="flex-1 flex flex-col relative min-w-0">
+        <header className="p-4 border-b border-gray-800 bg-gray-900/50 backdrop-blur-sm sticky top-0 z-10 flex items-center gap-4">
+          <button onClick={() => setIsMenuOpen(true)} className="hover:bg-gray-800 p-2 rounded-lg transition-colors">
             <span className="text-2xl">☰</span>
           </button>
           
@@ -103,27 +164,54 @@ const App: React.FC = () => {
             </button>
           </div>
         </header>
-        
-        {/* Cytoscape Canvas */}
-        <div className="flex-1 relative">
-          {elements.length > 0 ? (
-            <MindMap 
-              elements={elements} 
-              onNodeClick={(evidence) => setSelectedEvidence(evidence)} // Simple click = Show sources
-              onNodeDoubleClick={(label) => handleGenerate(label)} // Double click = Recursivity
-            />
-          ) : (
-            <div className="flex items-center justify-center h-full text-gray-500 italic">
-              Use the search bar above to start your medical exploration.
-            </div>
-          )}
-        </div>
-      </main>
 
-      {/* RIGHT: Evidence/Sources Panel */}
-      {/* Only visible if a node with evidence is selected */}
-      <Sidebar evidence={selectedEvidence} />
+        <div className="flex-1 relative overflow-hidden">
+          {/* THE GRAPH */}
+          <div className="w-full h-full">
+            {allElements.length > 0 ? (
+              <MindMap 
+                elements={allElements} 
+                onNodeClick={(nodeData) => {
+                  console.log("App.tsx received nodeData:", nodeData);
+                  try {
+                    const evField = nodeData.evidence;
+                    let parsed = [];
+                    if (typeof evField === 'string') {
+                      parsed = JSON.parse(evField);
+                    } else if (Array.isArray(evField)) {
+                      parsed = evField;
+                    }
+                    
+                    console.log("Setting selected node with evidence:", parsed);
+                    setSelectedNode({
+                      id: nodeData.id || `node-${Date.now()}`,
+                      label: nodeData.label || "Untitled Node",
+                      evidence: parsed
+                    });
+                  } catch (e) {
+                    console.error("Critical error in onNodeClick:", e);
+                    setSelectedNode({ id: 'error', label: nodeData.label || "Error", evidence: [] });
+                  }
+                }}
+                onNodeDoubleClick={(label) => handleGenerate(label)}
+                onAcceptSuggestion={handleAcceptSuggestion}
+                onDismissSuggestion={handleDismissSuggestion}
+                onExploreNode={handleExploreNode}
+              />
+            ) : (
+              <div className="flex items-center justify-center h-full text-gray-500 italic">
+                Use the search bar above to start your medical exploration.
+              </div>
+            )}
+          </div>
+
+          {/* THE SIDEBAR (Overlay on the right) */}
+      </div>
+
+      {/* FIXED OVERLAY SIDEBAR */}
+      <Sidebar key={selectedNode?.id || 'none'} data={selectedNode} onClose={() => setSelectedNode(null)} />
     </div>
+  </div>
   );
 };
 

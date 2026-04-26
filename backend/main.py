@@ -76,9 +76,10 @@ vectorstore = FAISS(embeddings_model, index, docstore, {i: str(i) for i in range
 @app.get("/projects/{project_id}")
 async def get_project_graph(project_id: str):
     query = """
-    MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(n:Concept)
-    OPTIONAL MATCH (n)-[r:RELATED_TO]->(m:Concept)
-    RETURN n, r, m
+    MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
+    OPTIONAL MATCH (n:Concept)-[r:RELATED_TO]->(m:Concept)
+    WHERE (root)-[:RELATED_TO*0..]->(n)
+    RETURN root, n, r, m
     """
     results = db.query(query, {"pid": project_id})
     elements = []
@@ -86,13 +87,16 @@ async def get_project_graph(project_id: str):
 
     for record in results:
         # Traitement des Nœuds
-        for key in ["n", "m"]:
-            node = record[key]
+        for key in ["root", "n", "m"]:
+            node = record.get(key)
             if node:
                 # On utilise le nom en minuscule comme ID unique et robuste
                 u_id = str(node["name"]).lower().strip()
                 if u_id not in added_ids:
-                    ev = json.loads(node["evidence"]) if "evidence" in node else []
+                    try:
+                        ev = json.loads(node["evidence"]) if "evidence" in node else []
+                    except:
+                        ev = []
                     elements.append({
                         "group": "nodes",
                         "data": { "id": u_id, "label": node["name"], "evidence": ev }
@@ -172,34 +176,50 @@ Return ONLY valid JSON:
                     # Fallback
                     suggestions_data.append({"name": item, "evidence": "[]"})
         except Exception as e:
-            logger.error(f"Mistral Error: {e}")
             suggestions_data = [
                 {"name": f"{request.concept} mechanisms", "evidence": "[]"},
-                {"name": f"{request.concept} clinical cases", "evidence": "[]"}
+                {"name": f"{request.concept} clinical cases", "evidence": "[]"},
+                {"name": f"{request.concept} diagnostics", "evidence": "[]"},
+                {"name": f"{request.concept} treatments", "evidence": "[]"},
+                {"name": f"{request.concept} risk factors", "evidence": "[]"}
             ]
 
     # Sauvegarde du Projet
     db.query("MERGE (p:Project {id: $pid}) ON CREATE SET p.title = $title, p.created_at = $date",
              {"pid": p_id, "title": f"Exploration: {request.concept}", "date": datetime.now().isoformat()})
 
-    # Sauvegarde des Concepts et des Relations
+    # Sauvegarde du Concept Parent Uniquement
     db.query("""
         MERGE (parent:Concept {name: $pname})
         SET parent.evidence = $ev
-        WITH parent
-        UNWIND $children as child_data
-        MERGE (child:Concept {name: child_data.name})
-        SET child.evidence = child_data.evidence
-        MERGE (parent)-[:RELATED_TO]->(child)
-    """, {"pname": request.concept, "children": suggestions_data, "ev": json.dumps(evidences)})
+    """, {"pname": request.concept, "ev": json.dumps(evidences)})
 
     # Liaison Racine
     if not request.project_id:
         db.query("MATCH (p:Project {id: $pid}) MATCH (c:Concept {name: $cname}) MERGE (p)-[:HAS_ROOT]->(c)", 
                  {"pid": p_id, "cname": request.concept})
 
-    suggested_names = [item["name"] for item in suggestions_data]
-    return {"project_id": p_id, "suggestions": suggested_names, "evidence_pointers": evidences}
+    return {"project_id": p_id, "parent": request.concept, "suggestions": suggestions_data, "evidence_pointers": evidences}
+
+class AcceptSuggestionRequest(BaseModel):
+    project_id: str
+    parent_concept: str
+    child_concept: str
+    evidence: str
+
+@app.post("/accept-suggestion")
+async def accept_suggestion(request: AcceptSuggestionRequest):
+    db.query("""
+        MATCH (parent:Concept {name: $pname})
+        MERGE (child:Concept {name: $cname})
+        SET child.evidence = $ev
+        MERGE (parent)-[:RELATED_TO]->(child)
+    """, {
+        "pname": request.parent_concept,
+        "cname": request.child_concept,
+        "ev": request.evidence
+    })
+    return {"status": "success"}
 
 @app.get("/projects")
 async def list_projects():
