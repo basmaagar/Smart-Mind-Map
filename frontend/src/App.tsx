@@ -98,6 +98,10 @@ const App: React.FC = () => {
     }
   };
 
+  const truncate = (str: string, n: number) => {
+    return (str.length > n) ? str.slice(0, n-1) + '...' : str;
+  };
+
   const handleNewProject = () => {
     setElements([]);
     setPendingSuggestions([]);
@@ -106,24 +110,78 @@ const App: React.FC = () => {
     setSearchInput("");
   };
 
-  const truncate = (str: string, n: number) => {
-    return (str.length > n) ? str.slice(0, n-1) + '...' : str;
+  // Calculate hierarchy and mark root
+  const processHierarchy = (els: any[]) => {
+    const nodes = els.filter(e => e.group === 'nodes');
+    const edges = els.filter(e => e.group === 'edges');
+    
+    // Identify root: node that is never a target
+    const targetIds = new Set(edges.map(e => e.data.target));
+    const rootNodes = nodes.filter(n => !targetIds.has(n.data.id));
+    
+    // If multiple potential roots, pick the one that is a source for most edges
+    const root = rootNodes.length > 0 
+      ? rootNodes.sort((a, b) => {
+          const aCount = edges.filter(e => e.data.source === a.data.id).length;
+          const bCount = edges.filter(e => e.data.source === b.data.id).length;
+          return bCount - aCount;
+        })[0]
+      : nodes[0];
+
+    // BFS to calculate depth
+    const depths: Record<string, number> = {};
+    if (root) {
+      const queue = [{ id: root.data.id, d: 0 }];
+      depths[root.data.id] = 0;
+      
+      while (queue.length > 0) {
+        const { id, d } = queue.shift()!;
+        edges.filter(e => e.data.source === id).forEach(e => {
+          if (depths[e.data.target] === undefined) {
+            depths[e.data.target] = d + 1;
+            queue.push({ id: e.data.target, d: d + 1 });
+          }
+        });
+      }
+    }
+
+    return els.map(el => {
+      if (el.group === 'nodes') {
+        const depth = depths[el.data.id] || 0;
+        return {
+          ...el,
+          data: {
+            ...el.data,
+            isRoot: el.data.id === root?.data.id,
+            depth: depth,
+            label: truncate(el.data.label || "", 60)
+          }
+        };
+      } else {
+        const sourceDepth = depths[el.data.source] || 0;
+        const targetNode = nodes.find(n => n.data.id === el.data.target);
+        const hasEvidence = targetNode && targetNode.data.evidence && targetNode.data.evidence.length > 0;
+        
+        return {
+          ...el,
+          data: {
+            ...el.data,
+            depth: sourceDepth,
+            isValidated: hasEvidence
+          }
+        };
+      }
+    });
   };
 
   const allElements = [
-    ...elements.map(el => ({
-      ...el,
-      data: {
-        ...el.data,
-        label: truncate(el.data.label || "", 60) // Increased limit for wider rectangles
-      }
-    })),
+    ...elements,
     ...pendingSuggestions.map(sug => ({
       group: 'nodes',
       classes: 'suggestion',
       data: { 
         id: `sug-${sug.name.toLowerCase().trim()}`, 
-        label: truncate(sug.name, 60), 
+        label: sug.name, 
         isSuggestion: true, 
         evidence: sug.evidence, 
         parentId: sug.parent,
@@ -132,32 +190,19 @@ const App: React.FC = () => {
     })),
     ...pendingSuggestions.map(sug => {
       const targetId = `sug-${sug.name.toLowerCase().trim()}`;
-      // Check if target suggestion has evidence (though suggestions usually don't have evidence until accepted)
-      const hasEvidence = sug.evidence && sug.evidence.length > 0;
-      
       return {
         group: 'edges',
         classes: 'suggestion-edge',
         data: { 
           id: `edge-sug-${sug.parent.toLowerCase().trim()}-${sug.name.toLowerCase().trim()}`, 
           source: sug.parent.toLowerCase().trim(), 
-          target: targetId,
-          isValidated: hasEvidence
+          target: targetId
         }
       };
     })
   ];
 
-  // We also need to mark existing edges as validated if the target node has evidence
-  const finalElements = allElements.map(el => {
-    if (el.group === 'edges') {
-      const targetNode = allElements.find(node => node.group === 'nodes' && node.data.id === el.data.target);
-      if (targetNode && targetNode.data.evidence && targetNode.data.evidence.length > 0) {
-        return { ...el, data: { ...el.data, isValidated: true } };
-      }
-    }
-    return el;
-  });
+  const finalElements = processHierarchy(allElements);
 
   return (
     <div className="app-container" style={{ backgroundColor: 'black', color: 'white', display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>

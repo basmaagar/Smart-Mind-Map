@@ -73,15 +73,29 @@ const MindMap: React.FC<MindMapProps> = ({
           } as any
         },
         {
+          selector: 'node[?isRoot]',
+          style: {
+            'width': '180px',
+            'height': '60px',
+            'font-size': '12px',
+            'background-color': '#00bfff',
+            'shadow-blur': 40,
+            'shadow-color': '#00bfff',
+            'shadow-opacity': 0.8,
+            'border-width': 1,
+            'border-color': '#ffffff'
+          } as any
+        },
+        {
           selector: 'edge',
           style: {
-            'width': 3,
+            'width': 'mapData(depth, 0, 5, 5, 1.5)',
             'line-color': '#444',
             'line-style': 'solid',
             'curve-style': 'bezier',
             'target-arrow-shape': 'triangle',
             'target-arrow-color': '#444',
-            'arrow-scale': 1,
+            'arrow-scale': 'mapData(depth, 0, 5, 1.2, 0.8)',
             'opacity': 0.8
           } as any
         },
@@ -90,7 +104,7 @@ const MindMap: React.FC<MindMapProps> = ({
           style: {
             'line-color': '#ffffff',
             'target-arrow-color': '#ffffff',
-            'width': 4,
+            'width': 'mapData(depth, 0, 5, 6, 2.5)',
             'shadow-blur': 15,
             'shadow-color': '#ffffff',
             'opacity': 1
