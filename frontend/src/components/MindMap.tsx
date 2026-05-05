@@ -247,9 +247,10 @@ const MindMap: React.FC<MindMapProps> = ({
     cyInstance.layout({
       name: 'cose',
       animate: true,
-      animationDuration: 1000,
+      animationDuration: 1200,
+      animationEasing: 'cubic-bezier(0.16, 1, 0.3, 1)', // Organic, premium easing
       randomize: false,
-      nodeRepulsion: () => 8000000, // Significantly increased repulsion
+      nodeRepulsion: () => 10000000, 
       idealEdgeLength: () => 200,
       nodeOverlap: 40,
       refresh: 20,

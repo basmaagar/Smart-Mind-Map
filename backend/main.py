@@ -20,7 +20,6 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
 
-# Configuration des logs
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,8 +28,30 @@ logger = logging.getLogger(__name__)
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
-Entrez.email = "your_email@example.com"
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+CACHE_FILE = "suggestion_cache.json"
 
+# --- PERSISTENT CACHE ---
+def load_cache() -> dict:
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_cache(cache: dict):
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(cache, f)
+    except Exception as e:
+        logger.warning(f"Cache save failed: {e}")
+
+_suggestion_cache: dict = load_cache()
+logger.info(f"Loaded {len(_suggestion_cache)} cached concepts from disk.")
+
+# --- NEO4J ---
 class Neo4jHandler:
     def __init__(self):
         try:
@@ -43,14 +64,14 @@ class Neo4jHandler:
             self.driver = None
 
     def query(self, query, parameters=None):
-        if not self.driver: return []
+        if not self.driver:
+            return []
         with self.driver.session() as session:
             return list(session.run(query, parameters))
 
 db = Neo4jHandler()
 app = FastAPI(title="MedMind OS - Kernel")
 
-# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -70,11 +91,13 @@ with open("med_texts.pkl", "rb") as f:
     docs = pickle.load(f)
 docstore = InMemoryDocstore({str(i): d for i, d in enumerate(docs)})
 vectorstore = FAISS(embeddings_model, index, docstore, {i: str(i) for i in range(len(docs))})
+logger.info(f"RAG loaded: {len(docs)} documents indexed.")
 
 # --- API ROUTES ---
 
 @app.get("/projects/{project_id}")
 async def get_project_graph(project_id: str):
+    # Unchanged from your original — this was working fine
     query = """
     MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
     OPTIONAL MATCH (n:Concept)-[r:RELATED_TO]->(m:Concept)
@@ -86,59 +109,83 @@ async def get_project_graph(project_id: str):
     added_ids = set()
 
     for record in results:
-        # Traitement des Nœuds
         for key in ["root", "n", "m"]:
             node = record.get(key)
             if node:
-                # On utilise le nom en minuscule comme ID unique et robuste
                 u_id = str(node["name"]).lower().strip()
                 if u_id not in added_ids:
                     try:
                         ev = json.loads(node["evidence"]) if "evidence" in node else []
-                    except:
+                    except Exception:
                         ev = []
                     elements.append({
                         "group": "nodes",
-                        "data": { "id": u_id, "label": node["name"], "evidence": ev }
+                        "data": {"id": u_id, "label": node["name"], "evidence": ev}
                     })
                     added_ids.add(u_id)
-        
-        # Traitement des Liens (Edges)
+
         if record.get("r") is not None and record.get("n") is not None and record.get("m") is not None:
             source_id = str(record["n"]["name"]).lower().strip()
             target_id = str(record["m"]["name"]).lower().strip()
-            
-            # On ne crée le lien que si la source et la cible existent
             elements.append({
                 "group": "edges",
                 "data": {
-                    "id": f"edge-{source_id}-{target_id}", # ID unique pour l'arête
-                    "source": source_id, 
+                    "id": f"edge-{source_id}-{target_id}",
+                    "source": source_id,
                     "target": target_id
                 }
             })
-    
-    # Log pour déboguer (vérifie tes terminaux)
+
     print(f"Envoi de {len(elements)} éléments pour le projet {project_id}")
     return elements
+
+
 @app.post("/suggest")
 async def suggest_and_save(request: SuggestRequest):
     p_id = request.project_id or str(uuid.uuid4())
-    
-    # RAG Search
-    relevant_docs = vectorstore.similarity_search(request.concept, k=5)
+    ck = request.concept.lower().strip()
+
+    # ADDED: cache hit — return instantly, skip RAG + LLM entirely
+    if ck in _suggestion_cache:
+        logger.info(f"Cache hit: '{ck}'")
+        cached = _suggestion_cache[ck]
+
+        # Still create the project and link root in Neo4j
+        db.query(
+            "MERGE (p:Project {id: $pid}) ON CREATE SET p.title = $title, p.created_at = $date",
+            {"pid": p_id, "title": f"Exploration: {request.concept}", "date": datetime.now().isoformat()}
+        )
+        db.query(
+            "MERGE (parent:Concept {name: $pname}) SET parent.evidence = $ev",
+            {"pname": request.concept, "ev": json.dumps(cached["evidences"])}
+        )
+        if not request.project_id:
+            db.query(
+                "MATCH (p:Project {id: $pid}) MATCH (c:Concept {name: $cname}) MERGE (p)-[:HAS_ROOT]->(c)",
+                {"pid": p_id, "cname": request.concept}
+            )
+        return {
+            "project_id": p_id,
+            "parent": request.concept,
+            "suggestions": cached["suggestions"],
+            "evidence_pointers": cached["evidences"],
+            "cached": True
+        }
+
+    # CHANGED: k=3 instead of k=5 — fewer chunks, shorter prompt, faster LLM response
+    relevant_docs = vectorstore.similarity_search(request.concept, k=3)
     evidences = [{"title": d.metadata.get("title"), "pubid": str(d.metadata.get("pubid"))} for d in relevant_docs]
-    
-    # Construction du contexte pour Mistral
+
     context_lines = []
     for d in relevant_docs:
         pubid = str(d.metadata.get("pubid"))
         title = d.metadata.get("title", "")
-        content = d.page_content[:300].replace("\n", " ") # Extrait pour le LLM
+        # CHANGED: 150 chars instead of 300 — enough context, shorter prompt
+        content = d.page_content[:150].replace("\n", " ")
         context_lines.append(f"Doc ID: {pubid} | Title: {title}\nSnippet: {content}")
     context_str = "\n\n".join(context_lines)
 
-    # LLM Generation via Ollama
+    # Unchanged prompt structure — this was producing good output
     prompt = f"""You are a medical expert. Based on the following documents about '{request.concept}', extract 5 highly specific sub-concepts.
 Context:
 {context_str}
@@ -154,12 +201,22 @@ Return ONLY valid JSON:
     }}
   ]
 }}"""
-    
+
     suggestions_data = []
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         try:
-            res = await client.post("http://localhost:11434/api/generate", 
-                                  json={"model": "mistral", "prompt": prompt, "format": "json", "stream": False})
+            res = await client.post(
+                "http://localhost:11434/api/generate",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "format": "json",
+                    "stream": False,
+                    # ADDED: hard token cap — prevents Mistral from generating
+                    # verbose output that bloats response time
+                    "options": {"num_predict": 250, "temperature": 0.3}
+                }
+            )
             parsed = json.loads(res.json().get("response", "{}"))
             subs = parsed.get("subtopics", [])
             for item in subs:
@@ -173,9 +230,9 @@ Return ONLY valid JSON:
                         })
                     suggestions_data.append({"name": term, "evidence": json.dumps(ev)})
                 elif isinstance(item, str):
-                    # Fallback
                     suggestions_data.append({"name": item, "evidence": "[]"})
         except Exception as e:
+            logger.error(f"LLM generation failed: {type(e).__name__}: {e}")
             suggestions_data = [
                 {"name": f"{request.concept} mechanisms", "evidence": "[]"},
                 {"name": f"{request.concept} clinical cases", "evidence": "[]"},
@@ -184,22 +241,33 @@ Return ONLY valid JSON:
                 {"name": f"{request.concept} risk factors", "evidence": "[]"}
             ]
 
-    # Sauvegarde du Projet
-    db.query("MERGE (p:Project {id: $pid}) ON CREATE SET p.title = $title, p.created_at = $date",
-             {"pid": p_id, "title": f"Exploration: {request.concept}", "date": datetime.now().isoformat()})
+    # ADDED: store in persistent cache for future requests
+    _suggestion_cache[ck] = {"suggestions": suggestions_data, "evidences": evidences}
+    save_cache(_suggestion_cache)
 
-    # Sauvegarde du Concept Parent Uniquement
+    # Unchanged Neo4j save logic — this was working in your original
+    db.query(
+        "MERGE (p:Project {id: $pid}) ON CREATE SET p.title = $title, p.created_at = $date",
+        {"pid": p_id, "title": f"Exploration: {request.concept}", "date": datetime.now().isoformat()}
+    )
     db.query("""
         MERGE (parent:Concept {name: $pname})
         SET parent.evidence = $ev
     """, {"pname": request.concept, "ev": json.dumps(evidences)})
 
-    # Liaison Racine
     if not request.project_id:
-        db.query("MATCH (p:Project {id: $pid}) MATCH (c:Concept {name: $cname}) MERGE (p)-[:HAS_ROOT]->(c)", 
-                 {"pid": p_id, "cname": request.concept})
+        db.query(
+            "MATCH (p:Project {id: $pid}) MATCH (c:Concept {name: $cname}) MERGE (p)-[:HAS_ROOT]->(c)",
+            {"pid": p_id, "cname": request.concept}
+        )
 
-    return {"project_id": p_id, "parent": request.concept, "suggestions": suggestions_data, "evidence_pointers": evidences}
+    return {
+        "project_id": p_id,
+        "parent": request.concept,
+        "suggestions": suggestions_data,
+        "evidence_pointers": evidences
+    }
+
 
 class AcceptSuggestionRequest(BaseModel):
     project_id: str
@@ -207,8 +275,10 @@ class AcceptSuggestionRequest(BaseModel):
     child_concept: str
     evidence: str
 
+
 @app.post("/accept-suggestion")
 async def accept_suggestion(request: AcceptSuggestionRequest):
+    # Unchanged — was working fine
     db.query("""
         MATCH (parent:Concept {name: $pname})
         MERGE (child:Concept {name: $cname})
@@ -221,10 +291,14 @@ async def accept_suggestion(request: AcceptSuggestionRequest):
     })
     return {"status": "success"}
 
+
 @app.get("/projects")
 async def list_projects():
-    results = db.query("MATCH (p:Project) RETURN p.id as id, p.title as title ORDER BY p.created_at DESC")
+    results = db.query(
+        "MATCH (p:Project) RETURN p.id as id, p.title as title ORDER BY p.created_at DESC"
+    )
     return [dict(r) for r in results]
+
 
 @app.post("/fetch-full-evidence")
 async def fetch_full_evidence(request: dict):
@@ -233,6 +307,7 @@ async def fetch_full_evidence(request: dict):
         return {"full_content": handle.read()}
     except Exception as e:
         return {"error": str(e)}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)

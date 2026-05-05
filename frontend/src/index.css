@@ -69,6 +69,23 @@ svg {
   overflow: hidden;
 }
 
+/* Radar Sweep Animation */
+@keyframes radar-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulse {
+  0% { opacity: 0.4; }
+  50% { opacity: 1; }
+  100% { opacity: 0.4; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 /* Scrollbar Hide */
 .scrollbar-hide::-webkit-scrollbar {
   display: none;

@@ -154,7 +154,7 @@ const App: React.FC = () => {
             ...el.data,
             isRoot: el.data.id === root?.data.id,
             depth: depth,
-            label: truncate(el.data.label || "", 60)
+            label: el.data.label || ""
           }
         };
       } else {
@@ -302,6 +302,29 @@ const App: React.FC = () => {
               onDismissSuggestion={handleDismissSuggestion}
             />
           </div>
+
+          {/* AI Processing Overlay (Radar) */}
+          {loading && (
+            <div style={{ position: 'absolute', inset: 0, zIndex: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.4)', pointerEvents: 'none' }}>
+              <div style={{ position: 'relative', width: '400px', height: '400px', borderRadius: '50%', border: '1px solid rgba(0, 127, 255, 0.2)', overflow: 'hidden' }}>
+                {/* Radar Sweep */}
+                <div style={{ 
+                  position: 'absolute', 
+                  inset: 0, 
+                  background: 'conic-gradient(from 0deg, transparent, rgba(0, 127, 255, 0.4))',
+                  animation: 'radar-spin 4s linear infinite'
+                }} />
+                {/* Radar Circles */}
+                <div style={{ position: 'absolute', inset: '25%', border: '1px solid rgba(0, 127, 255, 0.1)', borderRadius: '50%' }} />
+                <div style={{ position: 'absolute', inset: '50%', border: '1px solid rgba(0, 127, 255, 0.1)', borderRadius: '50%' }} />
+                
+                {/* Scanning Text */}
+                <div style={{ position: 'absolute', bottom: '20px', left: '50%', transform: 'translateX(-50%)', textAlign: 'center' }}>
+                   <span style={{ fontSize: '10px', fontWeight: 'bold', color: '#007fff', textTransform: 'uppercase', letterSpacing: '0.4em', animation: 'pulse 1s infinite' }}>Analyzing_Literature_Nodes...</span>
+                </div>
+              </div>
+            </div>
+          )}
           
           {/* Legend Overlay */}
           <div style={{ position: 'absolute', bottom: '24px', left: '24px', padding: '16px', border: '1px solid #111', backgroundColor: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(4px)', zIndex: 20 }}>
