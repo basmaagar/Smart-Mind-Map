@@ -1,5 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useImperativeHandle, forwardRef } from 'react';
 import cytoscape from 'cytoscape';
+import type { MindMapHandle } from './MindMapTypes';
+
+
 
 interface MindMapProps {
   elements: any[];
@@ -21,25 +24,27 @@ interface ActiveMenu {
   nodeData: any;
 }
 
-const MindMap: React.FC<MindMapProps> = ({ 
-  elements, 
-  onNodeClick, 
+const MindMapInner = forwardRef<MindMapHandle, MindMapProps>(({
+  elements,
+  onNodeClick,
   onNodeDoubleClick,
   onAcceptSuggestion,
   onDismissSuggestion,
   onExploreNode
-}) => {
+}, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [cyInstance, setCyInstance] = useState<cytoscape.Core | null>(null);
   const [activeMenu, setActiveMenu] = useState<ActiveMenu | null>(null);
 
-  // Keep references to the latest callbacks to avoid stale closures in Cytoscape events
+  useImperativeHandle(ref, () => ({
+    getCy: () => cyInstance
+  }));
+
   const callbacksRef = useRef({ onNodeClick, onNodeDoubleClick });
   useEffect(() => {
     callbacksRef.current = { onNodeClick, onNodeDoubleClick };
   }, [onNodeClick, onNodeDoubleClick]);
 
-  // 1. Initialize Cytoscape ONCE
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -73,6 +78,52 @@ const MindMap: React.FC<MindMapProps> = ({
           } as any
         },
         {
+          selector: 'node[category="symptom"]',
+          style: {
+            'background-color': '#ff4d4d',
+            'shadow-color': '#ff4d4d',
+            'shadow-blur': 18,
+            'shadow-opacity': 0.5
+          } as any
+        },
+        {
+          selector: 'node[category="treatment"]',
+          style: {
+            'background-color': '#00cc88',
+            'shadow-color': '#00cc88',
+            'shadow-blur': 18,
+            'shadow-opacity': 0.5
+          } as any
+        },
+        {
+          selector: 'node[category="mechanism"]',
+          style: {
+            'background-color': '#007fff',
+            'shadow-color': '#007fff',
+            'shadow-blur': 18,
+            'shadow-opacity': 0.5
+          } as any
+        },
+        {
+          selector: 'node[category="risk"]',
+          style: {
+            'background-color': '#ffaa00',
+            'shadow-color': '#ffaa00',
+            'shadow-blur': 18,
+            'shadow-opacity': 0.5,
+            'color': '#000000'
+          } as any
+        },
+        {
+          selector: 'node[category="diagnosis"]',
+          style: {
+            'background-color': '#aa44ff',
+            'shadow-color': '#aa44ff',
+            'shadow-blur': 18,
+            'shadow-opacity': 0.5
+          } as any
+        },
+        {
           selector: 'node[?isRoot]',
           style: {
             'width': '180px',
@@ -83,7 +134,8 @@ const MindMap: React.FC<MindMapProps> = ({
             'shadow-color': '#00bfff',
             'shadow-opacity': 0.8,
             'border-width': 1,
-            'border-color': '#ffffff'
+            'border-color': '#ffffff',
+            'color': '#ffffff'
           } as any
         },
         {
@@ -115,7 +167,6 @@ const MindMap: React.FC<MindMapProps> = ({
           style: {
             'border-width': 2,
             'border-color': '#ffffff',
-            'background-color': '#00bfff',
             'shadow-blur': 30,
             'shadow-opacity': 0.8
           } as any
@@ -143,11 +194,8 @@ const MindMap: React.FC<MindMapProps> = ({
       wheelSensitivity: 0.2
     });
 
-    // Event Bindings
     cy.on('tap', (evt) => {
-      if (evt.target === cy) {
-        setActiveMenu(null);
-      }
+      if (evt.target === cy) setActiveMenu(null);
     });
 
     cy.on('tap', 'node', (evt) => {
@@ -155,7 +203,6 @@ const MindMap: React.FC<MindMapProps> = ({
       const nodeData = node.data();
       const pos = node.renderedPosition();
       const h = node.renderedHeight();
-      
       setActiveMenu({
         id: nodeData.id,
         label: nodeData.label,
@@ -166,8 +213,6 @@ const MindMap: React.FC<MindMapProps> = ({
         suggestionObj: nodeData.suggestionObj,
         nodeData: nodeData
       });
-
-      // We still keep the auto-open on click for convenience
       callbacksRef.current.onNodeClick(nodeData);
     });
 
@@ -193,19 +238,12 @@ const MindMap: React.FC<MindMapProps> = ({
       }
     });
 
-    const handleResize = () => {
-      cy.resize();
-      // updateMenuPos(); // will be called by observer
-    };
-
+    const handleResize = () => cy.resize();
     const resizeObserver = new ResizeObserver(() => {
       cy.resize();
       updateMenuPos();
     });
-    if (containerRef.current) {
-      resizeObserver.observe(containerRef.current);
-    }
-
+    if (containerRef.current) resizeObserver.observe(containerRef.current);
     window.addEventListener('resize', handleResize);
 
     setCyInstance(cy);
@@ -215,18 +253,15 @@ const MindMap: React.FC<MindMapProps> = ({
       resizeObserver.disconnect();
       cy.destroy();
     };
-  }, []); // Empty dependency array = run once
+  }, []);
 
-  // 2. Update elements incrementally
   useEffect(() => {
     if (!cyInstance) return;
-
     if (!elements || elements.length === 0) {
       cyInstance.elements().remove();
       return;
     }
 
-    // Save old positions to avoid layout jumping
     const oldPositions = new Map();
     cyInstance.nodes().forEach(n => {
       oldPositions.set(n.id(), { ...n.position() });
@@ -235,67 +270,48 @@ const MindMap: React.FC<MindMapProps> = ({
     cyInstance.elements().remove();
     cyInstance.add(elements);
 
-    // Restore old positions
     cyInstance.nodes().forEach(n => {
       const oldPos = oldPositions.get(n.id());
-      if (oldPos) {
-        n.position(oldPos);
-      }
+      if (oldPos) n.position(oldPos);
     });
 
-    // Run layout incrementally
     cyInstance.layout({
       name: 'cose',
       animate: true,
       animationDuration: 1200,
-      animationEasing: 'cubic-bezier(0.16, 1, 0.3, 1)', // Organic, premium easing
+      animationEasing: 'cubic-bezier(0.16, 1, 0.3, 1)',
       randomize: false,
-      nodeRepulsion: () => 10000000, 
-      idealEdgeLength: () => 200,
+      nodeRepulsion: 400000,
+      idealEdgeLength: 100,
       nodeOverlap: 40,
       refresh: 20,
       fit: true,
       padding: 100
-    }).run();
-
+    } as any).run();
   }, [elements, cyInstance]);
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', backgroundColor: 'black' }}>
-      <div
-        ref={containerRef}
-        style={{ width: '100%', height: '100%', cursor: 'grab' }}
-      />
-      
-      {/* Floating Action Menu */}
+      <div ref={containerRef} style={{ width: '100%', height: '100%', cursor: 'grab' }} />
+
       {activeMenu && (
         <>
-          {/* TOP MENU: Actions */}
-          <div 
+          <div
             className="absolute z-50 transform -translate-x-1/2 -translate-y-full pb-6 pointer-events-auto"
-            style={{ 
-              left: activeMenu.x, 
-              top: activeMenu.y - (activeMenu.renderedHeight / 2) - 8
-            }}
+            style={{ left: activeMenu.x, top: activeMenu.y - (activeMenu.renderedHeight / 2) - 8 }}
           >
             <div className="bg-black border border-[#222] flex items-center gap-1 p-1 shadow-[0_0_20px_rgba(0,0,0,1)]">
               {activeMenu.isSuggestion ? (
                 <div className="flex items-center gap-1">
-                  <button 
-                    onClick={() => {
-                      onAcceptSuggestion?.(activeMenu.suggestionObj);
-                      setActiveMenu(null);
-                    }}
+                  <button
+                    onClick={() => { onAcceptSuggestion?.(activeMenu.suggestionObj); setActiveMenu(null); }}
                     className="w-10 h-10 bg-green-500 flex items-center justify-center text-black hover:bg-green-400 transition-all shadow-[0_0_15px_rgba(0,255,0,0.4)]"
                     title="Accept"
                   >
                     <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" d="M5 13l4 4L19 7"></path></svg>
                   </button>
-                  <button 
-                    onClick={() => {
-                      onDismissSuggestion?.(activeMenu.suggestionObj);
-                      setActiveMenu(null);
-                    }}
+                  <button
+                    onClick={() => { onDismissSuggestion?.(activeMenu.suggestionObj); setActiveMenu(null); }}
                     className="w-10 h-10 bg-rose-500 flex items-center justify-center text-white hover:bg-rose-400 transition-all shadow-[0_0_15px_rgba(255,0,0,0.4)]"
                     title="Dismiss"
                   >
@@ -303,11 +319,8 @@ const MindMap: React.FC<MindMapProps> = ({
                   </button>
                 </div>
               ) : (
-                <button 
-                  onClick={() => {
-                    onExploreNode?.(activeMenu.label);
-                    setActiveMenu(null);
-                  }}
+                <button
+                  onClick={() => { onExploreNode?.(activeMenu.label); setActiveMenu(null); }}
                   className="flex items-center gap-2 px-5 py-2 bg-blue-500/10 text-blue-500 border border-blue-500/30 hover:bg-blue-500 hover:text-white transition-all text-[9px] font-bold uppercase tracking-[0.2em]"
                 >
                   <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
@@ -317,20 +330,13 @@ const MindMap: React.FC<MindMapProps> = ({
             </div>
           </div>
 
-          {/* BOTTOM MENU: Evidence */}
-          <div 
+          <div
             className="absolute z-50 transform -translate-x-1/2 pointer-events-auto"
-            style={{ 
-              left: activeMenu.x, 
-              top: activeMenu.y + (activeMenu.renderedHeight / 2) + 8
-            }}
+            style={{ left: activeMenu.x, top: activeMenu.y + (activeMenu.renderedHeight / 2) + 8 }}
           >
             <div className="bg-black border border-[#222] p-1">
-              <button 
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onNodeClick(activeMenu.nodeData);
-                }}
+              <button
+                onClick={(e) => { e.stopPropagation(); onNodeClick(activeMenu.nodeData); }}
                 className="flex items-center gap-2 px-5 py-2 bg-[#050505] text-[#444] border border-[#111] hover:border-blue-500/50 hover:text-blue-500 transition-all text-[9px] font-bold uppercase tracking-[0.2em]"
               >
                 <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
@@ -342,6 +348,8 @@ const MindMap: React.FC<MindMapProps> = ({
       )}
     </div>
   );
-};
+});
 
-export default MindMap;
+MindMapInner.displayName = 'MindMap';
+
+export default MindMapInner;
