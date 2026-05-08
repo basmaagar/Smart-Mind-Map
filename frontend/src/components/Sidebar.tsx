@@ -56,12 +56,22 @@ const Sidebar: React.FC<SidebarProps> = ({ data, onClose }) => {
                     </p>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '16px', paddingTop: '8px', borderTop: '1px solid #111' }}>
                        <span style={{ fontSize: '8px', fontWeight: 'bold', color: '#00ff00', textTransform: 'uppercase' }}>PMID: {item.pubid}</span>
-                       <button 
-                         onClick={() => handleFetchFullText(item.pubid)}
-                         style={{ background: 'none', border: 'none', fontSize: '8px', fontWeight: 'bold', color: '#007fff', textTransform: 'uppercase', cursor: 'pointer' }}
+                       
+                       <a
+                         href={`https://pubmed.ncbi.nlm.nih.gov/${item.pubid}/`}
+                         target="_blank"
+                         rel="noopener noreferrer"
+                         style={{
+                           fontSize: '8px',
+                           fontWeight: 'bold',
+                           color: '#007fff',
+                           textTransform: 'uppercase',
+                           cursor: 'pointer',
+                           textDecoration: 'none'
+                         }}
                        >
-                         View_Abstract
-                       </button>
+                         View_Abstract ↗
+                       </a>
                     </div>
                   </div>
                 ))

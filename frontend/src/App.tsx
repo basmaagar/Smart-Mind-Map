@@ -253,30 +253,31 @@ const App: React.FC = () => {
     }
   };
 
-  const handleGenerate = async (concept: string) => {
-    if (!concept.trim()) return;
-    setLoading(true);
-    try {
-      const res = await axios.post(`${API_BASE}/suggest`, {
-        concept: concept,
-        project_id: currentProjectId
-      });
-      const { project_id, parent, suggestions } = res.data;
-      if (!currentProjectId) setCurrentProjectId(project_id);
-      await fetchGraph(project_id);
-      const newSuggestions = suggestions.map((s: any) => ({
-        ...s,
-        evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
-        parent: parent
-      }));
-      setPendingSuggestions(prev => [...prev, ...newSuggestions]);
-      setSearchInput("");
-    } catch (err) {
-      console.error("Generation failed:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const handleGenerate = async (concept: string, ancestors: string[] = []) => {
+  if (!concept.trim()) return;
+  setLoading(true);
+  try {
+    const res = await axios.post(`${API_BASE}/suggest`, {
+      concept: concept,
+      project_id: currentProjectId,
+      ancestors: ancestors  // ADDED
+    });
+    const { project_id, parent, suggestions } = res.data;
+    if (!currentProjectId) setCurrentProjectId(project_id);
+    await fetchGraph(project_id);
+    const newSuggestions = suggestions.map((s: any) => ({
+      ...s,
+      evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
+      parent: parent
+    }));
+    setPendingSuggestions(prev => [...prev, ...newSuggestions]);
+    setSearchInput("");
+  } catch (err) {
+    console.error("Generation failed:", err);
+  } finally {
+    setLoading(false);
+  }
+};
 
   const handleAcceptSuggestion = async (sug: Suggestion) => {
     if (!currentProjectId) return;
@@ -554,9 +555,9 @@ const App: React.FC = () => {
             <MindMap
               ref={mindMapRef}
               elements={finalElements}
-              onExploreNode={handleGenerate}
+              onExploreNode={(label, ancestors) => handleGenerate(label, ancestors)}
               onNodeClick={onNodeClick}
-              onNodeDoubleClick={handleGenerate}
+              onNodeDoubleClick={(label, ancestors) => handleGenerate(label, ancestors)}
               onAcceptSuggestion={handleAcceptSuggestion}
               onDismissSuggestion={handleDismissSuggestion}
             />

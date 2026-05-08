@@ -2,15 +2,13 @@ import React, { useEffect, useRef, useState, useImperativeHandle, forwardRef } f
 import cytoscape from 'cytoscape';
 import type { MindMapHandle } from './MindMapTypes';
 
-
-
 interface MindMapProps {
   elements: any[];
   onNodeClick: (nodeData: any) => void;
-  onNodeDoubleClick: (label: string) => void;
+  onNodeDoubleClick: (label: string, ancestors: string[]) => void;
   onAcceptSuggestion?: (suggestionObj: any) => void;
   onDismissSuggestion?: (suggestionObj: any) => void;
-  onExploreNode?: (label: string) => void;
+  onExploreNode?: (label: string, ancestors: string[]) => void;
 }
 
 interface ActiveMenu {
@@ -22,6 +20,7 @@ interface ActiveMenu {
   renderedHeight: number;
   suggestionObj?: any;
   nodeData: any;
+  ancestors: string[];
 }
 
 const MindMapInner = forwardRef<MindMapHandle, MindMapProps>(({
@@ -44,6 +43,30 @@ const MindMapInner = forwardRef<MindMapHandle, MindMapProps>(({
   useEffect(() => {
     callbacksRef.current = { onNodeClick, onNodeDoubleClick };
   }, [onNodeClick, onNodeDoubleClick]);
+
+  // Helper: given a node id, walk edges backwards to build ancestor chain
+  const getAncestors = (cy: cytoscape.Core, nodeId: string): string[] => {
+    const ancestors: string[] = [];
+    let currentId = nodeId;
+
+    while (true) {
+      // Find edge where current node is the target
+      const incomingEdges = cy.edges(`[target = "${currentId}"]`);
+      if (incomingEdges.length === 0) break;
+
+      const parentId = incomingEdges[0].data('source');
+      const parentNode = cy.getElementById(parentId);
+      if (!parentNode || parentNode.length === 0) break;
+
+      const parentLabel = parentNode.data('label');
+      if (!parentLabel) break;
+
+      ancestors.unshift(parentLabel); // add to front to maintain order
+      currentId = parentId;
+    }
+
+    return ancestors;
+  };
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -203,6 +226,10 @@ const MindMapInner = forwardRef<MindMapHandle, MindMapProps>(({
       const nodeData = node.data();
       const pos = node.renderedPosition();
       const h = node.renderedHeight();
+
+      // Build ancestor chain for this node
+      const ancestors = getAncestors(cy, nodeData.id);
+
       setActiveMenu({
         id: nodeData.id,
         label: nodeData.label,
@@ -211,8 +238,10 @@ const MindMapInner = forwardRef<MindMapHandle, MindMapProps>(({
         y: pos.y,
         renderedHeight: h,
         suggestionObj: nodeData.suggestionObj,
-        nodeData: nodeData
+        nodeData: nodeData,
+        ancestors // ADDED
       });
+
       callbacksRef.current.onNodeClick(nodeData);
     });
 
@@ -232,24 +261,26 @@ const MindMapInner = forwardRef<MindMapHandle, MindMapProps>(({
     cy.on('position', 'node', updateMenuPos);
 
     cy.on('dbltap', 'node', (evt) => {
-      const nodeData = evt.target.data();
+      const node = evt.target;
+      const nodeData = node.data();
       if (!nodeData.isSuggestion) {
-        callbacksRef.current.onNodeDoubleClick(nodeData.label);
+        // Build ancestor chain and pass it
+        const ancestors = getAncestors(cy, nodeData.id);
+        callbacksRef.current.onNodeDoubleClick(nodeData.label, ancestors);
       }
     });
 
-    const handleResize = () => cy.resize();
     const resizeObserver = new ResizeObserver(() => {
       cy.resize();
       updateMenuPos();
     });
     if (containerRef.current) resizeObserver.observe(containerRef.current);
-    window.addEventListener('resize', handleResize);
+    window.addEventListener('resize', () => cy.resize());
 
     setCyInstance(cy);
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('resize', () => cy.resize());
       resizeObserver.disconnect();
       cy.destroy();
     };
@@ -281,18 +312,85 @@ const MindMapInner = forwardRef<MindMapHandle, MindMapProps>(({
       animationDuration: 1200,
       animationEasing: 'cubic-bezier(0.16, 1, 0.3, 1)',
       randomize: false,
-      nodeRepulsion: 400000,
-      idealEdgeLength: 100,
+      nodeRepulsion: () => 10000000,
+      idealEdgeLength: () => 200,
       nodeOverlap: 40,
       refresh: 20,
       fit: true,
       padding: 100
     } as any).run();
+
   }, [elements, cyInstance]);
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', backgroundColor: 'black' }}>
       <div ref={containerRef} style={{ width: '100%', height: '100%', cursor: 'grab' }} />
+
+      {/* Zoom controls */}
+      <div style={{
+        position: 'absolute',
+        bottom: '24px',
+        right: '24px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '4px',
+        zIndex: 20
+      }}>
+        <button
+          onClick={() => cyInstance?.zoom({ level: cyInstance.zoom() * 1.2, renderedPosition: { x: cyInstance.width() / 2, y: cyInstance.height() / 2 } })}
+          style={{
+            width: '32px', height: '32px',
+            backgroundColor: '#050505',
+            border: '1px solid #222',
+            color: '#007fff',
+            fontSize: '18px',
+            fontWeight: 'bold',
+            cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transition: 'border-color 0.2s'
+          }}
+          onMouseEnter={e => (e.currentTarget.style.borderColor = '#007fff')}
+          onMouseLeave={e => (e.currentTarget.style.borderColor = '#222')}
+          title="Zoom In"
+        >+</button>
+
+        <button
+          onClick={() => cyInstance?.zoom({ level: cyInstance.zoom() * 0.8, renderedPosition: { x: cyInstance.width() / 2, y: cyInstance.height() / 2 } })}
+          style={{
+            width: '32px', height: '32px',
+            backgroundColor: '#050505',
+            border: '1px solid #222',
+            color: '#007fff',
+            fontSize: '18px',
+            fontWeight: 'bold',
+            cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transition: 'border-color 0.2s'
+          }}
+          onMouseEnter={e => (e.currentTarget.style.borderColor = '#007fff')}
+          onMouseLeave={e => (e.currentTarget.style.borderColor = '#222')}
+          title="Zoom Out"
+        >−</button>
+
+        <button
+          onClick={() => cyInstance?.fit(undefined, 100)}
+          style={{
+            width: '32px', height: '32px',
+            backgroundColor: '#050505',
+            border: '1px solid #222',
+            color: '#007fff',
+            fontSize: '9px',
+            fontWeight: 'bold',
+            cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transition: 'border-color 0.2s',
+            letterSpacing: '0.05em'
+          }}
+          onMouseEnter={e => (e.currentTarget.style.borderColor = '#007fff')}
+          onMouseLeave={e => (e.currentTarget.style.borderColor = '#222')}
+          title="Fit to screen"
+        >FIT</button>
+      </div>
 
       {activeMenu && (
         <>
@@ -320,7 +418,10 @@ const MindMapInner = forwardRef<MindMapHandle, MindMapProps>(({
                 </div>
               ) : (
                 <button
-                  onClick={() => { onExploreNode?.(activeMenu.label); setActiveMenu(null); }}
+                  onClick={() => {
+                    onExploreNode?.(activeMenu.label, activeMenu.ancestors);
+                    setActiveMenu(null);
+                  }}
                   className="flex items-center gap-2 px-5 py-2 bg-blue-500/10 text-blue-500 border border-blue-500/30 hover:bg-blue-500 hover:text-white transition-all text-[9px] font-bold uppercase tracking-[0.2em]"
                 >
                   <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
