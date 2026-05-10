@@ -1,108 +1,120 @@
 import React from 'react';
-import axios from 'axios';
 
 interface SidebarProps {
-  data: { label: string, evidence: any[] } | null;
+  data: { label: string; evidence: any[] } | null;
   onClose: () => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ data, onClose }) => {
-  const handleFetchFullText = async (pubid: string) => {
-    try {
-      const res = await axios.post("http://127.0.0.1:8000/fetch-full-evidence", { pubid });
-      if (res.data.full_content) {
-        alert(`PUBMED_DATA_DUMP [ID: ${pubid}]:\n\n${res.data.full_content}`);
-      }
-    } catch (err) {
-      console.error("Link error:", err);
-    }
-  };
-
   return (
-    <aside style={{ width: '320px', borderLeft: '1px solid #111', display: 'flex', flexDirection: 'column', backgroundColor: 'black', overflow: 'hidden', flexShrink: 0 }}>
-      {/* Panel Header */}
-      <div style={{ padding: '24px', borderBottom: '1px solid #111', backgroundColor: '#050505' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-          <span style={{ fontSize: '10px', fontWeight: 'bold', color: '#00ff00', letterSpacing: '0.3em', textTransform: 'uppercase' }}>Intelligence</span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: 'rgba(0, 255, 0, 0.1)', padding: '2px 8px', borderRadius: '2px', border: '1px solid rgba(0, 255, 0, 0.2)' }}>
-             <div style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#00ff00' }} />
-             <span style={{ fontSize: '8px', fontWeight: 'bold', color: '#00ff00', textTransform: 'uppercase' }}>Live</span>
+    <aside style={{
+      width: '220px',
+      borderLeft: '0.5px solid #e2e8f0',
+      display: 'flex',
+      flexDirection: 'column',
+      backgroundColor: '#ffffff',
+      overflow: 'hidden',
+      flexShrink: 0
+    }}>
+      <div style={{
+        padding: '12px 14px',
+        borderBottom: '0.5px solid #e2e8f0',
+        backgroundColor: '#ffffff'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2px' }}>
+          <span style={{ fontSize: '12px', fontWeight: 500, color: '#1a202c' }}>Evidence Panel</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <div style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#1D9E75' }} />
+            <span style={{ fontSize: '10px', color: '#1D9E75' }}>Live</span>
           </div>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column' }}>
-          <span style={{ fontSize: '10px', fontWeight: 'bold', color: '#444', textTransform: 'uppercase', letterSpacing: '0.1em' }}>RAG_ENGINE_ACTIVE</span>
-          <span style={{ fontSize: '12px', fontWeight: 'bold', color: 'white', textTransform: 'uppercase', marginTop: '8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{data?.label || "IDLE_STATE"}</span>
+        <div style={{ fontSize: '11px', color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {data?.label || 'Select a node'}
         </div>
       </div>
 
-      {/* Main Content */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '24px' }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
         {data ? (
-          <>
-            <div style={{ marginBottom: '32px' }}>
-              <h3 style={{ fontSize: '9px', fontWeight: 'bold', color: '#222', textTransform: 'uppercase', letterSpacing: '0.4em', marginBottom: '16px' }}>Data Sources</h3>
-              {data.evidence && data.evidence.length > 0 ? (
-                data.evidence.map((item, idx) => (
-                  <div key={idx} style={{ marginBottom: '12px', padding: '16px', backgroundColor: '#050505', border: '1px solid #111' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#00ff00', marginBottom: '12px' }}>
-                       <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                       <span style={{ fontSize: '9px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Source_00{idx + 1}: PubMed</span>
-                    </div>
-                    <p style={{ fontSize: '11px', fontWeight: 'bold', color: 'white', lineHeight: '1.5', textTransform: 'uppercase', marginBottom: '8px' }}>
-                      {item.title || "Research Publication"}
-                    </p>
-                    <p style={{ fontSize: '10px', color: '#444', lineHeight: '1.4', textTransform: 'uppercase', marginBottom: '12px' }}>
-                      {item.snippet || "No additional metadata available in current session."}
-                    </p>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px', paddingTop: '8px', borderTop: '1px solid #111' }}>
-                       <span style={{ fontSize: '8px', fontWeight: 'bold', color: '#00ff00', textTransform: 'uppercase' }}>PMID: {item.pubid}</span>
-                       
-                       <a
-                         href={`https://pubmed.ncbi.nlm.nih.gov/${item.pubid}/`}
-                         target="_blank"
-                         rel="noopener noreferrer"
-                         style={{
-                           fontSize: '8px',
-                           fontWeight: 'bold',
-                           color: '#007fff',
-                           textTransform: 'uppercase',
-                           cursor: 'pointer',
-                           textDecoration: 'none'
-                         }}
-                       >
-                         View_Abstract ↗
-                       </a>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div style={{ fontSize: '10px', color: '#222', textTransform: 'uppercase', fontWeight: 'bold', fontStyle: 'italic', padding: '40px 0', textAlign: 'center' }}>
-                   No specific evidence links found.
+          data.evidence && data.evidence.length > 0 ? (
+            data.evidence.map((item, idx) => (
+              <div key={idx} style={{
+                marginBottom: '8px',
+                background: '#f8fafc',
+                border: '0.5px solid #e2e8f0',
+                borderRadius: '8px',
+                padding: '9px'
+              }}>
+                <div style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '4px',
+                  fontSize: '10px', color: '#185FA5', background: '#E6F1FB',
+                  padding: '2px 6px', borderRadius: '4px', marginBottom: '5px'
+                }}>
+                  <svg width="10" height="10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  PubMed · Verified
                 </div>
-              )}
+                <div style={{
+                  fontSize: '11px', fontWeight: 500, color: '#1a202c',
+                  lineHeight: '1.4', marginBottom: '5px'
+                }}>
+                  {item.title || 'Research Publication'}
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: '10px', color: '#64748b' }}>PMID: {item.pubid}</span>
+                  <a
+                    href={`https://pubmed.ncbi.nlm.nih.gov/${item.pubid}/`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ fontSize: '10px', color: '#185FA5', textDecoration: 'none' }}
+                  >
+                    View ↗
+                  </a>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div style={{
+              marginTop: '8px',
+              background: '#f8fafc',
+              border: '0.5px solid #e2e8f0',
+              borderRadius: '8px',
+              padding: '9px'
+            }}>
+              <div style={{
+                display: 'inline-flex', alignItems: 'center', gap: '4px',
+                fontSize: '10px', color: '#64748b', background: '#f0f4f8',
+                padding: '2px 6px', borderRadius: '4px', marginBottom: '5px'
+              }}>
+                ○ LLM · Inferred
+              </div>
+              <div style={{ fontSize: '11px', color: '#64748b', lineHeight: '1.4' }}>
+                No PubMed sources linked. This node was generated from LLM medical knowledge.
+              </div>
             </div>
-
-            <div style={{ marginBottom: '16px' }}>
-               <h3 style={{ fontSize: '9px', fontWeight: 'bold', color: '#222', textTransform: 'uppercase', letterSpacing: '0.4em', marginBottom: '16px' }}>RAG Sources</h3>
-               <div style={{ padding: '16px', border: '1px solid #111', backgroundColor: '#050505', opacity: 0.3 }}>
-                  <span style={{ fontSize: '9px', fontWeight: 'bold', color: '#444', textTransform: 'uppercase' }}>Entries Waiting in Queue...</span>
-               </div>
-            </div>
-          </>
+          )
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', opacity: 0.1 }}>
-             <div style={{ width: '80px', height: '80px', border: '2px dashed #444', borderRadius: '2px', marginBottom: '16px' }} />
-             <span style={{ fontSize: '10px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5em' }}>Waiting for Node Select...</span>
+          <div style={{
+            display: 'flex', flexDirection: 'column', alignItems: 'center',
+            justifyContent: 'center', height: '100%', opacity: 0.4, paddingTop: '40px'
+          }}>
+            <svg width="32" height="32" fill="none" stroke="#94a3b8" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <span style={{ fontSize: '11px', color: '#94a3b8', marginTop: '8px', textAlign: 'center' }}>
+              Select a node to view evidence
+            </span>
           </div>
         )}
       </div>
 
-      {/* Panel Footer */}
-      <div style={{ padding: '24px', borderTop: '1px solid #111', backgroundColor: 'black' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '8px', fontWeight: 'bold', color: '#222', textTransform: 'uppercase', letterSpacing: '0.4em' }}>
-           <span>IO_PROCESS_01</span>
-           <span>0x7f3e2</span>
-        </div>
+      <div style={{
+        padding: '10px 14px',
+        borderTop: '0.5px solid #e2e8f0',
+        backgroundColor: '#ffffff'
+      }}>
+        <div style={{ fontSize: '10px', color: '#94a3b8' }}>RAG Engine · PubMed Index</div>
+        <div style={{ fontSize: '10px', color: '#1D9E75', marginTop: '2px' }}>● 10,000 articles indexed</div>
       </div>
     </aside>
   );

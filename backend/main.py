@@ -355,54 +355,96 @@ class StagedSuggestRequest(BaseModel):
     stage: str            # differential | mechanism | workup | treatment | monitoring
     accepted_nodes: Optional[List[str]] = []
     project_id: Optional[str] = None
-
 STAGE_PROMPTS = {
-    "differential": """You are a clinical diagnostician. A patient presents with: '{symptom}'.
-Based on these PubMed sources:
-{context}
+    "differential": """You are an experienced clinician. A patient presents with: '{symptom}'.
 
-List 5 possible differential diagnoses for '{symptom}', ranked from most to least common.
-Each must be a specific named medical condition, not a symptom.
+Generate exactly 5 differential diagnoses ranked from most to least likely.
+Each must be a specific named medical condition, not a symptom or category.
+Consider common causes first, then serious conditions that must not be missed.
+
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"diagnosis_name","evidence_pubid":"pubid"}}]}}""",
+{{"subtopics":[
+  {{"term":"Most_Likely_Diagnosis","likelihood":"common"}},
+  {{"term":"Second_Diagnosis","likelihood":"common"}},
+  {{"term":"Third_Diagnosis","likelihood":"less_common"}},
+  {{"term":"Fourth_Diagnosis","likelihood":"less_common"}},
+  {{"term":"Must_Not_Miss_Diagnosis","likelihood":"rare_but_critical"}}
+]}}""",
 
-    "mechanism": """You are a medical pathophysiologist. The working diagnosis is '{concept}', 
-originating from symptom '{symptom}'.
-Based on these PubMed sources:
-{context}
+    "mechanism": """You are a medical pathophysiologist. 
+Symptom: '{symptom}'
+Working diagnosis: '{concept}'
 
-List 5 specific pathophysiological mechanisms or processes underlying '{concept}'.
+Explain the pathophysiology of '{concept}' in 5 specific mechanistic steps or processes.
+Each must be a concrete biological mechanism, not a vague category.
+Example good answer: "Inflammatory cytokine release → mucosal barrier disruption"
+Example bad answer: "Inflammation"
+
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"mechanism_name","evidence_pubid":"pubid"}}]}}""",
+{{"subtopics":[
+  {{"term":"Specific_Mechanism_1"}},
+  {{"term":"Specific_Mechanism_2"}},
+  {{"term":"Specific_Mechanism_3"}},
+  {{"term":"Specific_Mechanism_4"}},
+  {{"term":"Specific_Mechanism_5"}}
+]}}""",
 
-    "workup": """You are a clinical diagnostician. The working diagnosis is '{concept}',
-originating from symptom '{symptom}'.
-Based on these PubMed sources:
-{context}
+    "workup": """You are a clinical diagnostician.
+Symptom: '{symptom}'
+Working diagnosis: '{concept}'
 
-List 5 specific diagnostic tests, imaging studies, or clinical assessments to confirm '{concept}'.
-Each must be a specific test name, not a category.
+List exactly 5 specific diagnostic tests or clinical assessments to confirm '{concept}'.
+Order them by clinical priority (most important first).
+Each must be a specific named test, not a category.
+Example good: "Troponin I serum level", "12-lead ECG", "CT pulmonary angiography"
+Example bad: "Blood tests", "Imaging"
+
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"test_name","evidence_pubid":"pubid"}}]}}""",
+{{"subtopics":[
+  {{"term":"First_Priority_Test"}},
+  {{"term":"Second_Priority_Test"}},
+  {{"term":"Third_Priority_Test"}},
+  {{"term":"Fourth_Priority_Test"}},
+  {{"term":"Fifth_Priority_Test"}}
+]}}""",
 
-    "treatment": """You are a clinical pharmacologist. The confirmed diagnosis is '{concept}',
-originating from symptom '{symptom}'.
-Based on these PubMed sources:
-{context}
+    "treatment": """You are a clinical pharmacologist and internist.
+Symptom: '{symptom}'
+Confirmed diagnosis: '{concept}'
 
-List 5 specific evidence-based treatments for '{concept}'.
-Include both pharmacological and non-pharmacological options where relevant.
+List exactly 5 specific evidence-based treatments for '{concept}'.
+Include both first-line and second-line options where relevant.
+Mix pharmacological and non-pharmacological where appropriate.
+Each must be a specific treatment name, not a category.
+Example good: "Aspirin 325mg loading dose", "Primary PCI within 90 minutes"
+Example bad: "Pain management", "Surgery"
+
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"treatment_name","evidence_pubid":"pubid"}}]}}""",
+{{"subtopics":[
+  {{"term":"First_Line_Treatment_1"}},
+  {{"term":"First_Line_Treatment_2"}},
+  {{"term":"Second_Line_Treatment_3"}},
+  {{"term":"Second_Line_Treatment_4"}},
+  {{"term":"Supportive_Treatment_5"}}
+]}}""",
 
-    "monitoring": """You are a clinical specialist. The treated condition is '{concept}',
-originating from symptom '{symptom}'.
-Based on these PubMed sources:
-{context}
+    "monitoring": """You are a clinical specialist in follow-up care.
+Symptom: '{symptom}'
+Treated condition: '{concept}'
 
-List 5 specific monitoring parameters, follow-up markers, or potential complications to watch for '{concept}'.
+List exactly 5 specific monitoring parameters, follow-up markers, or complications to watch for '{concept}' after treatment.
+Each must be specific and measurable.
+Example good: "Serial troponin levels at 3h and 6h", "30-day MACE event rate"
+Example bad: "Monitor patient", "Check labs"
+
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"parameter_name","evidence_pubid":"pubid"}}]}}"""
+{{"subtopics":[
+  {{"term":"Monitoring_Parameter_1"}},
+  {{"term":"Monitoring_Parameter_2"}},
+  {{"term":"Complication_To_Watch_3"}},
+  {{"term":"Follow_Up_Marker_4"}},
+  {{"term":"Prognosis_Indicator_5"}}
+]}}"""
 }
 
 @app.post("/suggest-staged")
@@ -414,6 +456,19 @@ async def suggest_staged(request: StagedSuggestRequest):
     if ck in _suggestion_cache:
         logger.info(f"Cache hit (staged): '{ck}'")
         cached = _suggestion_cache[ck]
+        db.query(
+            "MERGE (p:Project {id: $pid}) ON CREATE SET p.title = $title, p.created_at = $date",
+            {"pid": p_id, "title": f"Clinical: {request.symptom}", "date": datetime.now().isoformat()}
+        )
+        db.query(
+            "MERGE (parent:Concept {name: $pname}) SET parent.evidence = $ev, parent.stage = $stage",
+            {"pname": request.concept, "ev": json.dumps(cached["evidences"]), "stage": request.stage}
+        )
+        if not request.project_id:
+            db.query(
+                "MATCH (p:Project {id: $pid}) MATCH (c:Concept {name: $cname}) MERGE (p)-[:HAS_ROOT]->(c)",
+                {"pid": p_id, "cname": request.concept}
+            )
         return {
             "project_id": p_id,
             "parent": request.concept,
@@ -423,25 +478,13 @@ async def suggest_staged(request: StagedSuggestRequest):
             "cached": True
         }
 
-    # RAG retrieval — search using both concept and symptom for better results
-    search_query = f"{request.symptom} {request.concept}".strip()
-    relevant_docs = vectorstore.similarity_search(search_query, k=3)
-    evidences = [
-        {"title": d.metadata.get("title"), "pubid": str(d.metadata.get("pubid"))}
-        for d in relevant_docs
-    ]
-    context_str = "\n".join([
-        f"[{d.metadata.get('pubid')}] {d.metadata.get('title', '')}: "
-        f"{d.page_content[:150].replace(chr(10), ' ')}"
-        for d in relevant_docs
-    ])
-
-    # Get stage-specific prompt
+    # FIXED: Pure LLM reasoning — no RAG context for clinical stages
+    # RAG hurts here because 10k QA dataset doesn't have structured clinical content
+    # Mistral's medical training is more reliable for differential dx, workup, treatment
     prompt_template = STAGE_PROMPTS.get(request.stage, STAGE_PROMPTS["differential"])
     prompt = prompt_template.format(
         symptom=request.symptom,
-        concept=request.concept,
-        context=context_str
+        concept=request.concept
     )
 
     suggestions_data = []
@@ -454,38 +497,56 @@ async def suggest_staged(request: StagedSuggestRequest):
                     "prompt": prompt,
                     "format": "json",
                     "stream": False,
-                    "options": {"num_predict": 250, "temperature": 0.3}
+                    "options": {
+                        "num_predict": 300,
+                        "temperature": 0.2  # low temp = more precise clinical answers
+                    }
                 }
             )
-            parsed = json.loads(res.json().get("response", "{}"))
+            raw = res.json().get("response", "{}")
+            logger.info(f"Staged LLM raw: {raw[:200]}")
+            parsed = json.loads(raw)
             subs = parsed.get("subtopics", [])
+
             for item in subs:
                 if isinstance(item, dict) and "term" in item:
-                    ev = []
-                    if item.get("evidence_pubid"):
-                        ev.append({
-                            "title": next(
-                                (e["title"] for e in evidences
-                                 if str(e["pubid"]) == str(item["evidence_pubid"])),
-                                "Source Document"
-                            ),
-                            "pubid": str(item["evidence_pubid"])
-                        })
+                    # For differential, add likelihood tag to label
+                    term = item["term"]
+                    if request.stage == "differential" and "likelihood" in item:
+                        likelihood = item["likelihood"]
+                        if likelihood == "rare_but_critical":
+                            term = f"⚠ {term}"
                     suggestions_data.append({
-                        "name": item["term"],
-                        "evidence": json.dumps(ev),
+                        "name": term,
+                        "evidence": "[]",
                         "stage": request.stage
                     })
+
         except Exception as e:
             logger.error(f"Staged LLM failed: {type(e).__name__}: {e}")
-            # Intelligent fallback using LLM knowledge only
-            suggestions_data = await generate_llm_fallback(request.concept, [request.symptom])
+
+    # Fallback if LLM failed
+    if not suggestions_data:
+        logger.warning(f"Using fallback for staged '{request.stage}' on '{request.concept}'")
+        suggestions_data = await generate_llm_fallback(request.concept, [request.symptom])
+
+    # After getting suggestions, use RAG only to find supporting evidence links
+    # This keeps evidence pointers without letting bad RAG contaminate suggestions
+    try:
+        search_query = f"{request.symptom} {request.concept}"
+        relevant_docs = vectorstore.similarity_search(search_query, k=2)
+        evidences = [
+            {"title": d.metadata.get("title"), "pubid": str(d.metadata.get("pubid"))}
+            for d in relevant_docs
+        ]
+    except Exception:
+        evidences = []
 
     if suggestions_data:
         _suggestion_cache[ck] = {"suggestions": suggestions_data, "evidences": evidences}
         save_cache(_suggestion_cache)
 
-    # Save concept to Neo4j with stage property
+    # Neo4j save
     db.query(
         "MERGE (p:Project {id: $pid}) ON CREATE SET p.title = $title, p.created_at = $date",
         {"pid": p_id, "title": f"Clinical: {request.symptom}", "date": datetime.now().isoformat()}
