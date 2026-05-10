@@ -348,5 +348,171 @@ async def fetch_full_evidence(request: dict):
         return {"error": str(e)}
 
 
+
+class StagedSuggestRequest(BaseModel):
+    symptom: str          # the original root symptom
+    concept: str          # the node being expanded
+    stage: str            # differential | mechanism | workup | treatment | monitoring
+    accepted_nodes: Optional[List[str]] = []
+    project_id: Optional[str] = None
+
+STAGE_PROMPTS = {
+    "differential": """You are a clinical diagnostician. A patient presents with: '{symptom}'.
+Based on these PubMed sources:
+{context}
+
+List 5 possible differential diagnoses for '{symptom}', ranked from most to least common.
+Each must be a specific named medical condition, not a symptom.
+Return ONLY valid JSON:
+{{"subtopics":[{{"term":"diagnosis_name","evidence_pubid":"pubid"}}]}}""",
+
+    "mechanism": """You are a medical pathophysiologist. The working diagnosis is '{concept}', 
+originating from symptom '{symptom}'.
+Based on these PubMed sources:
+{context}
+
+List 5 specific pathophysiological mechanisms or processes underlying '{concept}'.
+Return ONLY valid JSON:
+{{"subtopics":[{{"term":"mechanism_name","evidence_pubid":"pubid"}}]}}""",
+
+    "workup": """You are a clinical diagnostician. The working diagnosis is '{concept}',
+originating from symptom '{symptom}'.
+Based on these PubMed sources:
+{context}
+
+List 5 specific diagnostic tests, imaging studies, or clinical assessments to confirm '{concept}'.
+Each must be a specific test name, not a category.
+Return ONLY valid JSON:
+{{"subtopics":[{{"term":"test_name","evidence_pubid":"pubid"}}]}}""",
+
+    "treatment": """You are a clinical pharmacologist. The confirmed diagnosis is '{concept}',
+originating from symptom '{symptom}'.
+Based on these PubMed sources:
+{context}
+
+List 5 specific evidence-based treatments for '{concept}'.
+Include both pharmacological and non-pharmacological options where relevant.
+Return ONLY valid JSON:
+{{"subtopics":[{{"term":"treatment_name","evidence_pubid":"pubid"}}]}}""",
+
+    "monitoring": """You are a clinical specialist. The treated condition is '{concept}',
+originating from symptom '{symptom}'.
+Based on these PubMed sources:
+{context}
+
+List 5 specific monitoring parameters, follow-up markers, or potential complications to watch for '{concept}'.
+Return ONLY valid JSON:
+{{"subtopics":[{{"term":"parameter_name","evidence_pubid":"pubid"}}]}}"""
+}
+
+@app.post("/suggest-staged")
+async def suggest_staged(request: StagedSuggestRequest):
+    p_id = request.project_id or str(uuid.uuid4())
+    ck = f"staged_{request.stage}_{request.concept.lower().strip()}"
+
+    # Cache hit
+    if ck in _suggestion_cache:
+        logger.info(f"Cache hit (staged): '{ck}'")
+        cached = _suggestion_cache[ck]
+        return {
+            "project_id": p_id,
+            "parent": request.concept,
+            "stage": request.stage,
+            "suggestions": cached["suggestions"],
+            "evidence_pointers": cached["evidences"],
+            "cached": True
+        }
+
+    # RAG retrieval — search using both concept and symptom for better results
+    search_query = f"{request.symptom} {request.concept}".strip()
+    relevant_docs = vectorstore.similarity_search(search_query, k=3)
+    evidences = [
+        {"title": d.metadata.get("title"), "pubid": str(d.metadata.get("pubid"))}
+        for d in relevant_docs
+    ]
+    context_str = "\n".join([
+        f"[{d.metadata.get('pubid')}] {d.metadata.get('title', '')}: "
+        f"{d.page_content[:150].replace(chr(10), ' ')}"
+        for d in relevant_docs
+    ])
+
+    # Get stage-specific prompt
+    prompt_template = STAGE_PROMPTS.get(request.stage, STAGE_PROMPTS["differential"])
+    prompt = prompt_template.format(
+        symptom=request.symptom,
+        concept=request.concept,
+        context=context_str
+    )
+
+    suggestions_data = []
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        try:
+            res = await client.post(
+                "http://localhost:11434/api/generate",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "format": "json",
+                    "stream": False,
+                    "options": {"num_predict": 250, "temperature": 0.3}
+                }
+            )
+            parsed = json.loads(res.json().get("response", "{}"))
+            subs = parsed.get("subtopics", [])
+            for item in subs:
+                if isinstance(item, dict) and "term" in item:
+                    ev = []
+                    if item.get("evidence_pubid"):
+                        ev.append({
+                            "title": next(
+                                (e["title"] for e in evidences
+                                 if str(e["pubid"]) == str(item["evidence_pubid"])),
+                                "Source Document"
+                            ),
+                            "pubid": str(item["evidence_pubid"])
+                        })
+                    suggestions_data.append({
+                        "name": item["term"],
+                        "evidence": json.dumps(ev),
+                        "stage": request.stage
+                    })
+        except Exception as e:
+            logger.error(f"Staged LLM failed: {type(e).__name__}: {e}")
+            # Intelligent fallback using LLM knowledge only
+            suggestions_data = await generate_llm_fallback(request.concept, [request.symptom])
+
+    if suggestions_data:
+        _suggestion_cache[ck] = {"suggestions": suggestions_data, "evidences": evidences}
+        save_cache(_suggestion_cache)
+
+    # Save concept to Neo4j with stage property
+    db.query(
+        "MERGE (p:Project {id: $pid}) ON CREATE SET p.title = $title, p.created_at = $date",
+        {"pid": p_id, "title": f"Clinical: {request.symptom}", "date": datetime.now().isoformat()}
+    )
+    db.query("""
+        MERGE (parent:Concept {name: $pname})
+        SET parent.evidence = $ev, parent.stage = $stage
+    """, {
+        "pname": request.concept,
+        "ev": json.dumps(evidences),
+        "stage": request.stage
+    })
+
+    if not request.project_id:
+        db.query(
+            "MATCH (p:Project {id: $pid}) MATCH (c:Concept {name: $cname}) MERGE (p)-[:HAS_ROOT]->(c)",
+            {"pid": p_id, "cname": request.concept}
+        )
+
+    return {
+        "project_id": p_id,
+        "parent": request.concept,
+        "stage": request.stage,
+        "suggestions": suggestions_data,
+        "evidence_pointers": evidences
+    }
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
