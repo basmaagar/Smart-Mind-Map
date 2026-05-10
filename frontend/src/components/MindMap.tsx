@@ -40,6 +40,7 @@ const MindMapInner = forwardRef<MindMapHandle, MindMapProps>(({
   const [cyInstance, setCyInstance] = useState<cytoscape.Core | null>(null);
   const [activeMenu, setActiveMenu] = useState<ActiveMenu | null>(null);
   const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(new Set());
+  const prevElementsRef = useRef<string>("");
 
   useImperativeHandle(ref, () => ({
     getCy: () => cyInstance
@@ -279,22 +280,48 @@ const MindMapInner = forwardRef<MindMapHandle, MindMapProps>(({
     if (!cyInstance) return;
     if (!elements || elements.length === 0) {
       cyInstance.elements().remove();
+      prevElementsRef.current = "";
       return;
     }
+
+    // Build a structural signature — only IDs and connections, not positions or metadata
+    const signature = JSON.stringify(
+      elements
+        .map(e => ({ id: e.data.id, source: e.data.source, target: e.data.target }))
+        .sort((a, b) => (a.id > b.id ? 1 : -1))
+    );
+
+    // If structure hasn't changed, don't re-render or re-layout
+    if (signature === prevElementsRef.current) return;
+    prevElementsRef.current = signature;
+
     const oldPositions = new Map();
     cyInstance.nodes().forEach(n => oldPositions.set(n.id(), { ...n.position() }));
+
     cyInstance.elements().remove();
     cyInstance.add(elements);
+
+    // Restore positions for existing nodes
+    let hasNewNodes = false;
     cyInstance.nodes().forEach(n => {
       const oldPos = oldPositions.get(n.id());
-      if (oldPos) n.position(oldPos);
+      if (oldPos) {
+        n.position(oldPos);
+      } else {
+        hasNewNodes = true;
+      }
     });
-    cyInstance.layout({
-      name: 'cose', animate: true, animationDuration: 1200,
-      randomize: false, nodeRepulsion: 4500,
-      idealEdgeLength: 100, nodeOverlap: 40,
-      refresh: 20, fit: true, padding: 100
-    } as any).run();
+
+    // Only run layout if there are genuinely new nodes
+    if (hasNewNodes) {
+      cyInstance.layout({
+        name: 'cose', animate: true, animationDuration: 1200,
+        randomize: false, nodeRepulsion: () => 10000000,
+        idealEdgeLength: () => 200, nodeOverlap: 40,
+        refresh: 20, fit: false, padding: 100
+      } as any).run();
+    }
+
   }, [elements, cyInstance]);
 
   // Search highlight
