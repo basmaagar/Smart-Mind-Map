@@ -20,14 +20,31 @@ const ProjectMenu: React.FC<ProjectMenuProps> = ({
   onNewProject
 }) => {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const fetchProjects = () => {
+    axios.get("http://127.0.0.1:8000/projects")
+      .then(res => setProjects(res.data))
+      .catch(err => console.error("Failed to load projects:", err));
+  };
 
   useEffect(() => {
-    if (isOpen) {
-      axios.get("http://127.0.0.1:8000/projects")
-        .then(res => setProjects(res.data))
-        .catch(err => console.error("Failed to load projects:", err));
-    }
+    if (isOpen) fetchProjects();
   }, [isOpen]);
+
+  const handleDelete = async (e: React.MouseEvent, projectId: string) => {
+    e.stopPropagation(); // prevent selecting the project when clicking delete
+    if (!window.confirm("Delete this map? This cannot be undone.")) return;
+    setDeletingId(projectId);
+    try {
+      await axios.delete(`http://127.0.0.1:8000/projects/${projectId}`);
+      setProjects(prev => prev.filter(p => p.id !== projectId));
+    } catch (err) {
+      console.error("Failed to delete project:", err);
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   return (
     <>
@@ -94,30 +111,66 @@ const ProjectMenu: React.FC<ProjectMenuProps> = ({
           <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
             {projects.length > 0 ? (
               projects.map(p => (
-                <button
+                <div
                   key={p.id}
-                  onClick={() => { onSelectProject(p.id); setIsOpen(false); }}
                   style={{
-                    width: '100%', textAlign: 'left', padding: '10px 12px',
-                    backgroundColor: '#f8fafc', color: '#334155',
+                    display: 'flex', alignItems: 'center', gap: '6px',
+                    backgroundColor: '#f8fafc',
                     border: '0.5px solid #e2e8f0', borderRadius: '8px',
-                    fontSize: '12px', fontWeight: 500, cursor: 'pointer',
-                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                    transition: 'all 0.15s'
+                    transition: 'all 0.15s', overflow: 'hidden'
                   }}
                   onMouseEnter={e => {
-                    e.currentTarget.style.backgroundColor = '#E6F1FB';
-                    e.currentTarget.style.borderColor = '#B5D4F4';
-                    e.currentTarget.style.color = '#185FA5';
+                    (e.currentTarget as HTMLDivElement).style.borderColor = '#B5D4F4';
+                    (e.currentTarget as HTMLDivElement).style.backgroundColor = '#E6F1FB';
                   }}
                   onMouseLeave={e => {
-                    e.currentTarget.style.backgroundColor = '#f8fafc';
-                    e.currentTarget.style.borderColor = '#e2e8f0';
-                    e.currentTarget.style.color = '#334155';
+                    (e.currentTarget as HTMLDivElement).style.borderColor = '#e2e8f0';
+                    (e.currentTarget as HTMLDivElement).style.backgroundColor = '#f8fafc';
                   }}
                 >
-                  {p.title || 'Untitled Map'}
-                </button>
+                  {/* Select button */}
+                  <button
+                    onClick={() => { onSelectProject(p.id); setIsOpen(false); }}
+                    style={{
+                      flex: 1, textAlign: 'left', padding: '10px 12px',
+                      background: 'none', border: 'none',
+                      color: '#334155', fontSize: '12px', fontWeight: 500,
+                      cursor: 'pointer', overflow: 'hidden',
+                      textOverflow: 'ellipsis', whiteSpace: 'nowrap'
+                    }}
+                  >
+                    {p.title || 'Untitled Map'}
+                  </button>
+
+                  {/* Delete button */}
+                  <button
+                    onClick={e => handleDelete(e, p.id)}
+                    disabled={deletingId === p.id}
+                    title="Delete map"
+                    style={{
+                      flexShrink: 0, width: '32px', height: '32px',
+                      margin: '4px', background: 'none',
+                      border: '0.5px solid transparent', borderRadius: '6px',
+                      color: deletingId === p.id ? '#94a3b8' : '#cbd5e1',
+                      cursor: deletingId === p.id ? 'not-allowed' : 'pointer',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      transition: 'all 0.15s', fontSize: '14px'
+                    }}
+                    onMouseEnter={e => {
+                      e.stopPropagation();
+                      (e.currentTarget as HTMLButtonElement).style.backgroundColor = '#FCEBEB';
+                      (e.currentTarget as HTMLButtonElement).style.borderColor = '#F09595';
+                      (e.currentTarget as HTMLButtonElement).style.color = '#A32D2D';
+                    }}
+                    onMouseLeave={e => {
+                      (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent';
+                      (e.currentTarget as HTMLButtonElement).style.borderColor = 'transparent';
+                      (e.currentTarget as HTMLButtonElement).style.color = '#cbd5e1';
+                    }}
+                  >
+                    {deletingId === p.id ? '...' : '×'}
+                  </button>
+                </div>
               ))
             ) : (
               <div style={{ padding: '32px 0', textAlign: 'center' }}>

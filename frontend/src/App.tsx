@@ -246,12 +246,33 @@ const App: React.FC = () => {
     await handleClinicalGenerateWithSymptom(symptom, symptom, 'differential');
   };
 
-  const enterNormalMode = async () => {
-    if (!pendingSymptom) return;
-    const concept = pendingSymptom;
-    setPendingSymptom(null);
-    await handleGenerate(concept);
-  };
+ const enterNormalMode = async () => {
+  if (!pendingSymptom) return;
+  const concept = pendingSymptom;
+  setPendingSymptom(null);
+  // Call the API directly, bypassing the symptom detection check
+  setLoading(true);
+  try {
+    const res = await axios.post(`${API_BASE}/suggest`, {
+      concept,
+      project_id: currentProjectId,
+      ancestors: []
+    });
+    const { project_id, parent, suggestions } = res.data;
+    if (!currentProjectId) setCurrentProjectId(project_id);
+    await fetchGraph(project_id);
+    setPendingSuggestions(prev => [...prev, ...suggestions.map((s: any) => ({
+      ...s,
+      evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
+      parent
+    }))]);
+    setSearchInput("");
+  } catch (err) {
+    console.error("Generation failed:", err);
+  } finally {
+    setLoading(false);
+  }
+};
 
   const handleAcceptSuggestion = async (sug: Suggestion) => {
     if (!currentProjectId) return;
