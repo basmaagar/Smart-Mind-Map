@@ -5,7 +5,7 @@ import MindMap from './components/MindMap';
 import type { MindMapHandle } from './components/MindMap';
 import Sidebar from './components/Sidebar';
 import ProjectMenu from './components/ProjectMenu';
-
+import PubMedSync from './components/PubMedSync';
 const API_BASE = "http://127.0.0.1:8000";
 
 interface Suggestion {
@@ -182,6 +182,8 @@ const App: React.FC = () => {
   const [rootSymptom, setRootSymptom] = useState<string | null>(null);
   const [currentStageIndex, setCurrentStageIndex] = useState(0);
   const [acceptedPerStage, setAcceptedPerStage] = useState<Record<string, string[]>>({});
+  const [isPubMedSyncOpen, setIsPubMedSyncOpen] = useState(false);
+  const [pubmedSyncRefresh, setPubmedSyncRefresh] = useState(0);
 
   const mindMapRef = useRef<MindMapHandle>(null);
   const projectTitle = elements.find(e => e.data?.isRoot)?.data?.label || 'MedMind_Export';
@@ -194,28 +196,45 @@ const App: React.FC = () => {
     } catch (err) { console.error("Error fetching graph:", err); }
   };
 
-  const handleGenerate = async (concept: string, ancestors: string[] = []) => {
-    if (!concept.trim()) return;
-    if (!currentProjectId && isSymptom(concept)) {
-      setPendingSymptom(concept);
-      setSearchInput("");
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await axios.post(`${API_BASE}/suggest`, { concept, project_id: currentProjectId, ancestors });
-      const { project_id, parent, suggestions } = res.data;
-      if (!currentProjectId) setCurrentProjectId(project_id);
-      await fetchGraph(project_id);
-      setPendingSuggestions(prev => [...prev, ...suggestions.map((s: any) => ({
-        ...s,
-        evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
-        parent
-      }))]);
-      setSearchInput("");
-    } catch (err) { console.error("Generation failed:", err); }
-    finally { setLoading(false); }
-  };
+const handleGenerate = async (concept: string, ancestors: string[] = []) => {
+  if (!concept.trim()) return;
+
+  // If user types a new root concept while a map already exists,
+  // reset to a new project — prevents orphan disconnected subgraphs
+  if (currentProjectId && ancestors.length === 0 && elements.length > 0) {
+    handleNewProject();
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+
+  // Symptom detection only for root-level concepts (no ancestors)
+  if (!currentProjectId && ancestors.length === 0 && isSymptom(concept)) {
+    setPendingSymptom(concept);
+    setSearchInput("");
+    return;
+  }
+
+  setLoading(true);
+  try {
+    const res = await axios.post(`${API_BASE}/suggest`, {
+      concept,
+      project_id: currentProjectId,
+      ancestors
+    });
+    const { project_id, parent, suggestions } = res.data;
+    if (!currentProjectId) setCurrentProjectId(project_id);
+    await fetchGraph(project_id);
+    setPendingSuggestions(prev => [...prev, ...suggestions.map((s: any) => ({
+      ...s,
+      evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
+      parent
+    }))]);
+    setSearchInput("");
+  } catch (err) {
+    console.error("Generation failed:", err);
+  } finally {
+    setLoading(false);
+  }
+};
 
   const handleClinicalGenerateWithSymptom = async (symptom: string, concept: string, stage: string) => {
     setLoading(true);
@@ -419,6 +438,11 @@ const App: React.FC = () => {
   return (
     <div style={{ backgroundColor: '#f0f4f8', color: '#1a202c', display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
       <ProjectMenu isOpen={isHistoryOpen} setIsOpen={setIsHistoryOpen} onSelectProject={fetchGraph} onNewProject={handleNewProject} />
+      <PubMedSync
+        isOpen={isPubMedSyncOpen}
+        setIsOpen={setIsPubMedSyncOpen}
+        refreshTrigger={pubmedSyncRefresh}
+      />
 
       {/* Header */}
       <header style={{
@@ -550,7 +574,7 @@ const App: React.FC = () => {
           <div style={{ padding: '14px 0 8px' }}>
             <div style={{ fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '0 20px', marginBottom: '6px' }}>Workspace</div>
             {[
-              { id: 'neural', label: 'Knowledge Map', icon: 'M13 10V3L4 14h7v7l9-11h-7z', active: true },
+              { id: 'neural', label: 'Knowledge Map', icon: 'M13 10V3L4 14h7v7l9-11h-7z', active: true, onClick: handleNewProject },
               { id: 'history', label: 'Session History', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
               { id: 'trials', label: 'Clinical Trials', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2' },
               { id: 'pubmed', label: 'PubMed Sync', icon: 'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253' },
@@ -558,6 +582,11 @@ const App: React.FC = () => {
               <button key={item.id}
                 onClick={() => { if (item.id === 'history') setIsHistoryOpen(true); if (item.id === 'neural') handleNewProject(); }}
                 style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '7px 12px', margin: '0 8px 2px', width: 'calc(100% - 16px)', border: 'none', background: item.active ? '#E6F1FB' : 'none', borderRadius: '8px', color: item.active ? '#185FA5' : '#64748b', cursor: 'pointer', textAlign: 'left' }}
+                onClick={() => {
+                  if (item.id === 'history') setIsHistoryOpen(true);
+                  if (item.id === 'pubmed') setIsPubMedSyncOpen(true);
+                  if (item.id === 'neural') handleNewProject();
+                }}
               >
                 <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={item.icon} /></svg>
                 <span style={{ fontSize: '12px', fontWeight: item.active ? 500 : 400 }}>{item.label}</span>
@@ -686,8 +715,14 @@ const App: React.FC = () => {
           )}
         </main>
 
-        <Sidebar data={selectedNode} onClose={() => setSelectedNode(null)} key={selectedNode?.id} />
-      </div>
+        <Sidebar
+          data={selectedNode}
+          onClose={() => setSelectedNode(null)}
+          key={selectedNode?.id}
+          onArticleSaved={() => setPubmedSyncRefresh(prev => prev + 1)}
+        /> 
+        
+             </div>
 
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }

@@ -7,9 +7,9 @@ ENV PYTHONUNBUFFERED 1
 
 WORKDIR /app
 
-# Install dependencies
+# Update pip and install dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && pip install --no-cache-dir --upgrade -r requirements.txt
 
 # Copy the rest of the code
 COPY . .

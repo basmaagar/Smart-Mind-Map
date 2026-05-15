@@ -14,6 +14,8 @@ from pydantic import BaseModel
 from Bio import Entrez
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
+import re
+
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -101,7 +103,9 @@ PLACEHOLDER_TERMS = {
     "second_diagnosis", "third_diagnosis", "fourth_diagnosis",
     "must_not_miss", "must_not_miss_diagnosis", "write_actual_medical_term",
     "specific_medical_subtopic", "write_actual_pmid", "pmid_from_above",
-    "pmid", "term", "none"
+    "pmid", "term", "none", "actual_medical_term", "actual_mechanism_name",
+    "actual_test_name", "actual_treatment_name", "actual_parameter_name",
+    "actual_disease_name", "write_real_medical_term_here"
 }
 
 # --- SUGGESTION BUILDER WITH GUARANTEED EVIDENCE ---
@@ -124,8 +128,17 @@ def build_suggestions(
 
         # Reject placeholder values echoed from prompt
         normalized = term.lower().replace(" ", "_").strip("⚠ ")
+        # Exact match against known placeholders
         if normalized in PLACEHOLDER_TERMS:
             logger.warning(f"Rejected placeholder term: {term}")
+            continue
+        # Catch numbered variants: "Actual Medical Term 1", "Actual Medical Term 2" etc.
+        if re.match(r'^actual[_ ]medical[_ ]term[_ ]*\d*$', normalized):
+            logger.warning(f"Rejected numbered placeholder: {term}")
+            continue
+        # Catch any term that is just generic words + a number
+        if re.match(r'^(actual|specific|real|sample|example|placeholder)[_ ].+[_ ]*\d+$', normalized):
+            logger.warning(f"Rejected generic placeholder: {term}")
             continue
 
         # Reject if too short or looks like a template artifact
@@ -497,40 +510,19 @@ async def get_project_graph(project_id: str):
 
 @app.delete("/projects/{project_id}")
 async def delete_project(project_id: str):
-    """
-    Delete a project and all its associated concepts and relationships.
-    Cleans up orphaned concepts that belong only to this project.
-    """
     try:
-        # Remove HAS_ROOT relationship first
-        db.query("""
-            MATCH (p:Project {id: $pid})-[r:HAS_ROOT]->()
-            DELETE r
-        """, {"pid": project_id})
-
-        # Remove concepts that are only connected to this project's graph
-        # and have no other relationships
+        # Single query — detach delete removes all relationships then nodes
+        # DETACH DELETE is the correct Neo4j pattern for this
         db.query("""
             MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
             OPTIONAL MATCH (root)-[:RELATED_TO*0..]->(n:Concept)
-            WITH collect(DISTINCT n) + [root] as all_nodes
-            UNWIND all_nodes as node
-            OPTIONAL MATCH (node)-[r]-()
-            DELETE r
+            DETACH DELETE n, root, p
         """, {"pid": project_id})
 
-        db.query("""
-            MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
-            OPTIONAL MATCH (root)-[:RELATED_TO*0..]->(n:Concept)
-            WITH collect(DISTINCT n) + [root] as all_nodes
-            UNWIND all_nodes as node
-            DELETE node
-        """, {"pid": project_id})
-
-        # Finally delete the project node itself
+        # Fallback — if project has no root yet, delete the project node alone
         db.query("""
             MATCH (p:Project {id: $pid})
-            DELETE p
+            DETACH DELETE p
         """, {"pid": project_id})
 
         logger.info(f"Deleted project: {project_id}")
@@ -539,7 +531,6 @@ async def delete_project(project_id: str):
     except Exception as e:
         logger.error(f"Failed to delete project {project_id}: {e}")
         return {"status": "error", "message": str(e)}
-
 
 @app.post("/suggest")
 async def suggest_and_save(request: SuggestRequest):
@@ -614,14 +605,8 @@ Task: suggest 5 NEW, SPECIFIC, REAL medical subtopics for '{request.concept}'.
 - Go deeper given map depth {graph_context['depth']}
 - Every term must have evidence_pubid set to one of: {available_pmids}
 
-Return ONLY valid JSON (no extra text):
-{{"subtopics":[
-  {{"term":"Actual_Medical_Term","evidence_pubid":"{first_pmid}"}},
-  {{"term":"Actual_Medical_Term","evidence_pubid":"{first_pmid}"}},
-  {{"term":"Actual_Medical_Term","evidence_pubid":"{first_pmid}"}},
-  {{"term":"Actual_Medical_Term","evidence_pubid":"{first_pmid}"}},
-  {{"term":"Actual_Medical_Term","evidence_pubid":"{first_pmid}"}}
-]}}"""
+Return ONLY valid JSON with 5 real medical terms (no placeholder text):
+{{"subtopics":[{{"term":"FILL_WITH_REAL_TERM","evidence_pubid":"{first_pmid}"}}]}}"""
 
     suggestions_data = []
     async with httpx.AsyncClient(timeout=180.0) as client:
@@ -848,7 +833,48 @@ async def fetch_full_evidence(request: dict):
         return {"full_content": handle.read()}
     except Exception as e:
         return {"error": str(e)}
+class SaveArticleRequest(BaseModel):
+    pubid: str
+    title: str
 
+@app.post("/saved-articles")
+async def save_article(request: SaveArticleRequest):
+    """Save a PubMed article to the global library."""
+    try:
+        db.query("""
+            MERGE (a:SavedArticle {pubid: $pubid})
+            SET a.title = $title, a.saved_at = $date
+        """, {
+            "pubid": request.pubid,
+            "title": request.title,
+            "date": datetime.now().isoformat()
+        })
+        logger.info(f"Saved article: {request.pubid}")
+        return {"status": "success", "pubid": request.pubid}
+    except Exception as e:
+        logger.error(f"Failed to save article: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.get("/saved-articles")
+async def get_saved_articles():
+    """Get all saved PubMed articles."""
+    results = db.query(
+        "MATCH (a:SavedArticle) RETURN a.pubid as pubid, a.title as title, "
+        "a.saved_at as saved_at ORDER BY a.saved_at DESC"
+    )
+    return [dict(r) for r in results]
+
+@app.delete("/saved-articles/{pubid}")
+async def delete_saved_article(pubid: str):
+    """Remove an article from the saved library."""
+    try:
+        db.query(
+            "MATCH (a:SavedArticle {pubid: $pubid}) DETACH DELETE a",
+            {"pubid": pubid}
+        )
+        return {"status": "success", "deleted": pubid}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
