@@ -3,6 +3,7 @@ import httpx
 import uvicorn
 import uuid
 import os
+import re
 import asyncio
 import logging
 import xml.etree.ElementTree as ET
@@ -14,8 +15,6 @@ from pydantic import BaseModel
 from Bio import Entrez
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
-import re
-
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -25,8 +24,14 @@ NEO4J_URI = os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi")
+BIOPORTAL_API_KEY = os.getenv("BIOPORTAL_API_KEY", "")
 CACHE_FILE = "suggestion_cache.json"
 Entrez.email = os.getenv("ENTREZ_EMAIL", "your_email@example.com")
+
+BIOPORTAL_ONTOLOGIES = "DOID,MESH,SNOMEDCT,NCI,HP"
+
+logger.info(f"BioPortal key set: {bool(BIOPORTAL_API_KEY)}")
+logger.info(f"Ollama model: {OLLAMA_MODEL}")
 
 # --- CACHE ---
 def load_cache() -> dict:
@@ -46,6 +51,7 @@ def save_cache(cache: dict):
         logger.warning(f"Cache save failed: {e}")
 
 _suggestion_cache: dict = load_cache()
+_bioportal_cache: dict = {}
 logger.info(f"Loaded {len(_suggestion_cache)} cached concepts.")
 
 # --- NEO4J ---
@@ -58,7 +64,7 @@ class Neo4jHandler:
             logger.info("Connected to Neo4j.")
         except Exception as e:
             logger.error(f"Neo4j connection error: {e}")
-            self.driver = None
+            self.driver = None # Set driver to None on error
 
     def query(self, query, parameters=None):
         if not self.driver:
@@ -95,7 +101,10 @@ class AcceptSuggestionRequest(BaseModel):
     child_concept: str
     evidence: str
 
-# Placeholder terms that LLMs echo from prompt templates
+class SaveArticleRequest(BaseModel):
+    pubid: str
+    title: str
+
 PLACEHOLDER_TERMS = {
     "specific_medical_term", "real_medical_term_here",
     "specific_mechanism", "specific_test", "specific_treatment",
@@ -105,15 +114,175 @@ PLACEHOLDER_TERMS = {
     "specific_medical_subtopic", "write_actual_pmid", "pmid_from_above",
     "pmid", "term", "none", "actual_medical_term", "actual_mechanism_name",
     "actual_test_name", "actual_treatment_name", "actual_parameter_name",
-    "actual_disease_name", "write_real_medical_term_here"
+    "actual_disease_name", "write_real_medical_term_here", "fill_with_real_term"
 }
 
-# --- SUGGESTION BUILDER WITH GUARANTEED EVIDENCE ---
+# --- BIOPORTAL ---
+async def get_bioportal_context(concept: str) -> dict:
+    """
+    Query BioPortal for ontology context:
+    - synonyms (for PubMed query expansion)
+    - semantic type (disease, symptom, drug etc.)
+    - definition (shown as evidence in UI)
+    - ontology ID and source (shown as evidence in UI)
+    - parent concepts
+    Falls back gracefully if API key not set or request fails.
+    """
+    if not BIOPORTAL_API_KEY:
+        logger.warning("BIOPORTAL_API_KEY not set — skipping BioPortal")
+        return {
+            "synonyms": [], "semantic_type": None,
+            "parents": [], "definition": None,
+            "ontology_id": None, "ontology_name": None, "concept_uri": None
+        }
+
+    ck = concept.lower().strip()
+    if ck in _bioportal_cache:
+        logger.info(f"BioPortal cache hit: '{ck}'")
+        return _bioportal_cache[ck]
+
+    result = {
+        "synonyms": [], "semantic_type": None,
+        "parents": [], "definition": None,
+        "ontology_id": None, "ontology_name": None, "concept_uri": None
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.get(
+                "https://data.bioontology.org/search",
+                params={
+                    "q": concept,
+                    "ontologies": BIOPORTAL_ONTOLOGIES,
+                    "include": "prefLabel,synonym,semanticType,definition,properties",
+                    "require_exact_match": "false",
+                    "pagesize": 3,
+                    "apikey": BIOPORTAL_API_KEY  # key as query param — most reliable
+                },
+                headers={"Accept": "application/json"}
+            )
+
+            if res.status_code != 200:
+                logger.warning(f"BioPortal search failed: {res.status_code} — {res.text[:100]}")
+                return result
+
+            data = res.json()
+            collection = data.get("collection", [])
+
+            if not collection:
+                logger.warning(f"BioPortal: no results for '{concept}'")
+                return result
+
+            best = collection[0]
+
+            # Synonyms — deduplicated, max 4
+            raw_synonyms = best.get("synonym", [])
+            result["synonyms"] = list(set([
+                s.strip() for s in raw_synonyms
+                if s.strip().lower() != concept.lower() and len(s.strip()) > 2
+            ]))[:4]
+
+            # Semantic type
+            semantic_types = best.get("semanticType", [])
+            if semantic_types:
+                result["semantic_type"] = semantic_types[0]
+
+            # Definition — first non-empty definition
+            definitions = best.get("definition", [])
+            if definitions:
+                result["definition"] = definitions[0][:300] if definitions[0] else None
+
+            # Ontology source info
+            links = best.get("links", {})
+            ontology_link = links.get("ontology", "")
+            if ontology_link:
+                result["ontology_id"] = ontology_link.split("/ontologies/")[-1]
+
+            # Concept URI — used as the "view" link in evidence panel
+            result["concept_uri"] = best.get("@id", None)
+
+            # Preferred label from ontology
+            result["ontology_name"] = best.get("prefLabel", concept)
+
+            # Parent concepts
+            parents = best.get("parents", [])
+            if isinstance(parents, list):
+                result["parents"] = [
+                    p["prefLabel"] for p in parents[:2] # Ensure p is a dict and has 'prefLabel'
+                    if isinstance(p, dict) and "prefLabel" in p
+                ]
+
+        logger.info(
+            f"BioPortal enriched '{concept}': "
+            f"{len(result['synonyms'])} synonyms, "
+            f"type={result['semantic_type']}, "
+            f"ontology={result['ontology_id']}, "
+            f"has_definition={bool(result['definition'])}"
+        )
+        _bioportal_cache[ck] = result
+        return result
+
+    except Exception as e:
+        logger.error(f"BioPortal error for '{concept}': {type(e).__name__}: {e}")
+        return result
+
+
+def build_enriched_pubmed_query(
+    concept: str,
+    bioportal_context: dict,
+    graph_context: dict,
+    ancestors: list
+) -> str:
+    terms = [concept]
+    synonyms = bioportal_context.get("synonyms", [])[:2]
+    terms.extend(synonyms)
+    base_query = " OR ".join(f'"{t}"' for t in terms) if len(terms) > 1 else concept
+    
+    # Ensure ancestors is not empty before accessing its last element
+    if ancestors: 
+        base_query = f"({base_query}) AND {ancestors[-1]}"
+    depth = graph_context.get("depth", 0)
+    if depth == 0:
+        base_query += " AND (overview OR pathophysiology OR etiology)"
+    elif depth == 1:
+        base_query += " AND (mechanism OR clinical)"
+    else:
+        base_query += " AND (treatment OR outcome OR management)"
+    return base_query
+
+
+def build_bioportal_evidence(bioportal_context: dict, concept: str) -> dict:
+    """
+    Build a BioPortal evidence object to include alongside PubMed evidence.
+    Returns None if no meaningful ontology data found.
+    """
+    ontology_id = bioportal_context.get("ontology_id")
+    definition = bioportal_context.get("definition")
+    semantic_type = bioportal_context.get("semantic_type")
+    concept_uri = bioportal_context.get("concept_uri")
+    ontology_name = bioportal_context.get("ontology_name", concept)
+
+    if not ontology_id:
+        return None
+
+    return {
+        "source": "bioportal",
+        "ontology_id": ontology_id,
+        "ontology_name": ontology_name,
+        "semantic_type": semantic_type,
+        "definition": definition,
+        "concept_uri": concept_uri,
+        "synonyms": bioportal_context.get("synonyms", [])
+    }
+
+
+# --- SUGGESTION BUILDER ---
 def build_suggestions(
     items: list,
     docs: list,
     stage: str = None,
-    existing: list = None
+    existing: list = None,
+    bioportal_evidence: Optional[dict] = None # Make optional for clarity
 ) -> list:
     existing = existing or []
     suggestions = []
@@ -126,44 +295,33 @@ def build_suggestions(
         if not term:
             continue
 
-        # Reject placeholder values echoed from prompt
         normalized = term.lower().replace(" ", "_").strip("⚠ ")
-        # Exact match against known placeholders
+
         if normalized in PLACEHOLDER_TERMS:
-            logger.warning(f"Rejected placeholder term: {term}")
+            logger.warning(f"Rejected placeholder: {term}")
             continue
-        # Catch numbered variants: "Actual Medical Term 1", "Actual Medical Term 2" etc.
         if re.match(r'^actual[_ ]medical[_ ]term[_ ]*\d*$', normalized):
             logger.warning(f"Rejected numbered placeholder: {term}")
             continue
-        # Catch any term that is just generic words + a number
         if re.match(r'^(actual|specific|real|sample|example|placeholder)[_ ].+[_ ]*\d+$', normalized):
             logger.warning(f"Rejected generic placeholder: {term}")
             continue
-
-        # Reject if too short or looks like a template artifact
         if len(term) < 3 or term.startswith("{") or term.startswith("["):
             continue
-
-        # Filter duplicates using graph context
         if any(term.lower() == ex.lower() for ex in existing):
             logger.info(f"Graph RAG filtered duplicate: {term}")
             continue
 
-        # Handle rare_but_critical flag for differential stage
         if stage == "differential" and item.get("likelihood") == "rare_but_critical":
             term = f"⚠ {term}"
 
-        # Try exact PMID match
         evidence_pubid = str(item.get("evidence_pubid", "")).strip()
         matching = None
 
         if evidence_pubid and evidence_pubid.lower() not in {"pmid", "pmid_from_above", "none", ""}:
             matching = next(
-                (d for d in docs if str(d["pubid"]).strip() == evidence_pubid),
-                None
+                (d for d in docs if str(d["pubid"]).strip() == evidence_pubid), None
             )
-            # Partial match fallback
             if not matching:
                 matching = next(
                     (d for d in docs if
@@ -172,13 +330,22 @@ def build_suggestions(
                     None
                 )
 
-        # Final fallback — assign first doc so every suggestion has PubMed evidence
         if not matching and docs:
             matching = docs[0]
 
         ev = []
         if matching:
-            ev.append({"title": matching["title"], "pubid": matching["pubid"]})
+            ev.append({
+                "source": "pubmed",
+                "title": matching["title"],
+                "pubid": matching["pubid"]
+            })
+
+        # Add BioPortal as second evidence source if available
+        # BioPortal evidence is now added directly to the suggestion object, not inside 'ev'
+        result = {"name": term, "evidence": json.dumps(ev)}
+        if bioportal_evidence: # Add bioportal_evidence at the top level
+            ev.append(bioportal_evidence)
 
         result = {"name": term, "evidence": json.dumps(ev)}
         if stage:
@@ -189,16 +356,12 @@ def build_suggestions(
     return suggestions
 
 
-# --- GRAPH RAG: Neo4j traversal ---
+# --- GRAPH RAG ---
 def get_graph_context(concept: str, project_id: Optional[str] = None) -> dict:
     context = {
-        "existing_nodes": [],
-        "siblings": [],
-        "depth": 0,
-        "related_explored": [],
-        "graph_summary": ""
+        "existing_nodes": [], "siblings": [],
+        "depth": 0, "related_explored": [], "graph_summary": ""
     }
-
     try:
         if project_id:
             all_nodes_result = db.query("""
@@ -245,30 +408,13 @@ def get_graph_context(concept: str, project_id: Optional[str] = None) -> dict:
             summary_parts.append(f"Depth: {context['depth']}")
 
         context["graph_summary"] = " | ".join(summary_parts) if summary_parts else "No prior graph context"
-
         logger.info(
             f"Graph RAG for '{concept}': depth={context['depth']}, "
             f"existing={len(context['existing_nodes'])}, siblings={len(context['siblings'])}"
         )
-
     except Exception as e:
         logger.error(f"Graph RAG traversal failed: {e}")
-
     return context
-
-
-def enrich_pubmed_query(concept: str, graph_context: dict, ancestors: list) -> str:
-    base_query = concept
-    if ancestors:
-        base_query = f"{concept} {ancestors[-1]}"
-    depth = graph_context.get("depth", 0)
-    if depth == 0:
-        base_query += " overview pathophysiology"
-    elif depth == 1:
-        base_query += " mechanism clinical"
-    else:
-        base_query += " specific treatment outcome"
-    return base_query
 
 
 # --- LIVE PUBMED RAG ---
@@ -289,10 +435,8 @@ def fetch_pubmed_abstracts(query: str, max_results: int = 3) -> list:
             return []
 
         fetch_handle = Entrez.efetch(
-            db="pubmed",
-            id=",".join(pmids),
-            rettype="xml",
-            retmode="xml"
+            db="pubmed", id=",".join(pmids),
+            rettype="xml", retmode="xml"
         )
         raw_xml = fetch_handle.read()
         fetch_handle.close()
@@ -308,11 +452,7 @@ def fetch_pubmed_abstracts(query: str, max_results: int = 3) -> list:
                 abstract_texts = article.findall(".//AbstractText")
                 abstract = " ".join((el.text or "") for el in abstract_texts).strip()
                 if abstract:
-                    docs.append({
-                        "pubid": pubid,
-                        "title": title,
-                        "abstract": abstract[:150]
-                    })
+                    docs.append({"pubid": pubid, "title": title, "abstract": abstract[:150]})
             except Exception as e:
                 logger.warning(f"Failed to parse article: {e}")
                 continue
@@ -321,7 +461,7 @@ def fetch_pubmed_abstracts(query: str, max_results: int = 3) -> list:
         return docs
 
     except Exception as e:
-        logger.error(f"PubMed API error for '{query}': {type(e).__name__}: {e}")
+        logger.error(f"PubMed API error: {type(e).__name__}: {e}")
         return []
 
 
@@ -339,9 +479,8 @@ def build_evidences(docs: list) -> list:
 
 # --- LLM FALLBACK ---
 async def generate_llm_fallback(
-    concept: str,
-    ancestors: list,
-    docs: list = None
+    concept: str, ancestors: list,
+    docs: list = None, bioportal_evidence: dict = None
 ) -> list:
     ancestor_str = " → ".join(ancestors + [concept]) if ancestors else concept
     prompt = f"""You are a medical expert. List 5 real, specific clinical subtopics for: {concept}
@@ -354,17 +493,15 @@ Return ONLY valid JSON: {{"subtopics":[{{"term":"write_real_medical_term_here"}}
             res = await client.post(
                 "http://localhost:11434/api/generate",
                 json={
-                    "model": OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "format": "json",
-                    "stream": False,
+                    "model": OLLAMA_MODEL, "prompt": prompt,
+                    "format": "json", "stream": False,
                     "options": {"num_predict": 200, "temperature": 0.4}
                 }
             )
             parsed = json.loads(res.json().get("response", "{}"))
             items = parsed.get("subtopics", [])
             if docs:
-                return build_suggestions(items, docs)
+                return build_suggestions(items, docs, bioportal_evidence=bioportal_evidence)
             return [
                 {"name": item["term"], "evidence": "[]"}
                 for item in items
@@ -383,80 +520,58 @@ STAGE_PROMPTS = {
 PubMed evidence (use ONLY these PMIDs):
 {context}
 
+Ontology context: {ontology_context}
+
 Graph context — DO NOT suggest these already-mapped concepts:
 {graph_summary}
 
 Generate exactly 5 real differential diagnoses ranked most to least likely.
-Write actual disease names — NOT placeholder text like "Diagnosis_Name".
+Write actual disease names — NOT placeholder text.
 
 Return ONLY valid JSON:
 {{"subtopics":[
-  {{"term":"Actual_Disease_Name","likelihood":"common","evidence_pubid":"ACTUAL_PMID"}},
-  {{"term":"Actual_Disease_Name","likelihood":"common","evidence_pubid":"ACTUAL_PMID"}},
-  {{"term":"Actual_Disease_Name","likelihood":"less_common","evidence_pubid":"ACTUAL_PMID"}},
-  {{"term":"Actual_Disease_Name","likelihood":"less_common","evidence_pubid":"ACTUAL_PMID"}},
-  {{"term":"Actual_Disease_Name","likelihood":"rare_but_critical","evidence_pubid":"ACTUAL_PMID"}}
+  {{"term":"Real_Disease_Name","likelihood":"common","evidence_pubid":"ACTUAL_PMID"}},
+  {{"term":"Real_Disease_Name","likelihood":"common","evidence_pubid":"ACTUAL_PMID"}},
+  {{"term":"Real_Disease_Name","likelihood":"less_common","evidence_pubid":"ACTUAL_PMID"}},
+  {{"term":"Real_Disease_Name","likelihood":"less_common","evidence_pubid":"ACTUAL_PMID"}},
+  {{"term":"Real_Disease_Name","likelihood":"rare_but_critical","evidence_pubid":"ACTUAL_PMID"}}
 ]}}""",
 
     "mechanism": """You are a medical pathophysiologist.
 Symptom: '{symptom}' | Diagnosis: '{concept}'
-
-PubMed evidence (use ONLY these PMIDs):
-{context}
-
-Graph context — DO NOT repeat these:
-{graph_summary}
-
-List 5 real pathophysiological mechanisms for '{concept}'.
-Write actual mechanism names — NOT placeholder text like "Specific_Mechanism".
-
+PubMed evidence: {context}
+Ontology context: {ontology_context}
+Graph context — DO NOT repeat: {graph_summary}
+List 5 real pathophysiological mechanisms. Write actual mechanism names.
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"Actual_Mechanism_Name","evidence_pubid":"ACTUAL_PMID"}}]}}""",
+{{"subtopics":[{{"term":"Real_Mechanism_Name","evidence_pubid":"ACTUAL_PMID"}}]}}""",
 
     "workup": """You are a clinical diagnostician.
 Symptom: '{symptom}' | Diagnosis: '{concept}'
-
-PubMed evidence (use ONLY these PMIDs):
-{context}
-
-Graph context — DO NOT repeat these:
-{graph_summary}
-
-List 5 real diagnostic tests to confirm '{concept}', ordered by priority.
-Write actual test names — NOT placeholder text like "Specific_Test".
-
+PubMed evidence: {context}
+Ontology context: {ontology_context}
+Graph context — DO NOT repeat: {graph_summary}
+List 5 real diagnostic tests ordered by priority. Write actual test names.
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"Actual_Test_Name","evidence_pubid":"ACTUAL_PMID"}}]}}""",
+{{"subtopics":[{{"term":"Real_Test_Name","evidence_pubid":"ACTUAL_PMID"}}]}}""",
 
     "treatment": """You are a clinical pharmacologist.
 Symptom: '{symptom}' | Diagnosis: '{concept}'
-
-PubMed evidence (use ONLY these PMIDs):
-{context}
-
-Graph context — DO NOT repeat these:
-{graph_summary}
-
-List 5 real evidence-based treatments for '{concept}'.
-Write actual treatment names — NOT placeholder text like "Specific_Treatment".
-
+PubMed evidence: {context}
+Ontology context: {ontology_context}
+Graph context — DO NOT repeat: {graph_summary}
+List 5 real evidence-based treatments. Write actual treatment names.
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"Actual_Treatment_Name","evidence_pubid":"ACTUAL_PMID"}}]}}""",
+{{"subtopics":[{{"term":"Real_Treatment_Name","evidence_pubid":"ACTUAL_PMID"}}]}}""",
 
     "monitoring": """You are a clinical specialist.
 Symptom: '{symptom}' | Condition: '{concept}'
-
-PubMed evidence (use ONLY these PMIDs):
-{context}
-
-Graph context — DO NOT repeat these:
-{graph_summary}
-
-List 5 real monitoring parameters for '{concept}'.
-Write actual parameter names — NOT placeholder text like "Monitoring_Parameter".
-
+PubMed evidence: {context}
+Ontology context: {ontology_context}
+Graph context — DO NOT repeat: {graph_summary}
+List 5 real monitoring parameters. Write actual parameter names.
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"Actual_Parameter_Name","evidence_pubid":"ACTUAL_PMID"}}]}}"""
+{{"subtopics":[{{"term":"Real_Parameter_Name","evidence_pubid":"ACTUAL_PMID"}}]}}"""
 }
 
 
@@ -511,26 +626,18 @@ async def get_project_graph(project_id: str):
 @app.delete("/projects/{project_id}")
 async def delete_project(project_id: str):
     try:
-        # Single query — detach delete removes all relationships then nodes
-        # DETACH DELETE is the correct Neo4j pattern for this
         db.query("""
             MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
             OPTIONAL MATCH (root)-[:RELATED_TO*0..]->(n:Concept)
             DETACH DELETE n, root, p
         """, {"pid": project_id})
-
-        # Fallback — if project has no root yet, delete the project node alone
-        db.query("""
-            MATCH (p:Project {id: $pid})
-            DETACH DELETE p
-        """, {"pid": project_id})
-
+        db.query("MATCH (p:Project {id: $pid}) DETACH DELETE p", {"pid": project_id})
         logger.info(f"Deleted project: {project_id}")
         return {"status": "success", "deleted": project_id}
-
     except Exception as e:
         logger.error(f"Failed to delete project {project_id}: {e}")
         return {"status": "error", "message": str(e)}
+
 
 @app.post("/suggest")
 async def suggest_and_save(request: SuggestRequest):
@@ -538,7 +645,6 @@ async def suggest_and_save(request: SuggestRequest):
     ck = request.concept.lower().strip()
     ancestors = request.ancestors or []
 
-    # Cache hit
     if ck in _suggestion_cache:
         logger.info(f"Cache hit: '{ck}'")
         cached = _suggestion_cache[ck]
@@ -560,16 +666,23 @@ async def suggest_and_save(request: SuggestRequest):
         return {
             "project_id": p_id, "parent": request.concept,
             "suggestions": cached["suggestions"],
-            "evidence_pointers": cached["evidences"], "cached": True
+                "evidence_pointers": cached["evidences"],
+                "ontology_evidence": cached.get("ontology_evidence"), # Retrieve from cache
+                "cached": True
         }
 
-    # GRAPH RAG — traverse Neo4j for context
-    graph_context = get_graph_context(
-        request.concept,
-        p_id if request.project_id else None
+    # Run Graph RAG and BioPortal in parallel
+    graph_context, bioportal_context = await asyncio.gather(
+        asyncio.to_thread(
+            get_graph_context, request.concept,
+            p_id if request.project_id else None
+        ),
+        get_bioportal_context(request.concept)
     )
 
-    enriched_query = enrich_pubmed_query(request.concept, graph_context, ancestors)
+    enriched_query = build_enriched_pubmed_query(
+        request.concept, bioportal_context, graph_context, ancestors
+    )
     docs = await asyncio.to_thread(fetch_pubmed_abstracts, enriched_query, 3)
     if not docs:
         docs = await asyncio.to_thread(fetch_pubmed_abstracts, request.concept, 3)
@@ -578,11 +691,25 @@ async def suggest_and_save(request: SuggestRequest):
     context_str = build_context_str(docs)
     ancestor_chain = " → ".join(ancestors + [request.concept]) if ancestors else request.concept
 
+    # Build BioPortal evidence object for UI
+    bp_evidence = build_bioportal_evidence(bioportal_context, request.concept)
+
+    # Build ontology context string for LLM prompt
+    synonyms = bioportal_context.get("synonyms", [])
+    semantic_type = bioportal_context.get("semantic_type", "")
+    parents = bioportal_context.get("parents", [])
+    ontology_parts = []
+    if synonyms:
+        ontology_parts.append(f"Synonyms: {', '.join(synonyms)}")
+    if semantic_type:
+        ontology_parts.append(f"Type: {semantic_type}")
+    if parents:
+        ontology_parts.append(f"Broader: {', '.join(parents)}")
+    ontology_context = " | ".join(ontology_parts) if ontology_parts else "Not available"
+
     all_existing = list(set(
-        graph_context["existing_nodes"] +
-        graph_context["siblings"] +
-        graph_context["related_explored"] +
-        ancestors
+        graph_context["existing_nodes"] + graph_context["siblings"] +
+        graph_context["related_explored"] + ancestors
     ))
 
     available_pmids = ", ".join(str(d["pubid"]) for d in docs) if docs else "none"
@@ -594,18 +721,18 @@ Concept: '{request.concept}'
 Clinical hierarchy: {ancestor_chain}
 Map depth: {graph_context['depth']}
 
+Ontology context (BioPortal): {ontology_context}
+
 PubMed evidence (ONLY use these PMIDs: {available_pmids}):
 {context_str}
 
-Already mapped — DO NOT suggest these concepts:
-{', '.join(all_existing[:15]) if all_existing else 'None yet'}
+Already mapped — DO NOT suggest: {', '.join(all_existing[:15]) if all_existing else 'None'}
 
-Task: suggest 5 NEW, SPECIFIC, REAL medical subtopics for '{request.concept}'.
+Suggest 5 NEW, SPECIFIC, REAL medical subtopics for '{request.concept}'.
 - Write actual medical terms, NOT placeholders
-- Go deeper given map depth {graph_context['depth']}
-- Every term must have evidence_pubid set to one of: {available_pmids}
+- Every term must have evidence_pubid from: {available_pmids}
 
-Return ONLY valid JSON with 5 real medical terms (no placeholder text):
+Return ONLY valid JSON with 5 real medical terms:
 {{"subtopics":[{{"term":"FILL_WITH_REAL_TERM","evidence_pubid":"{first_pmid}"}}]}}"""
 
     suggestions_data = []
@@ -614,28 +741,31 @@ Return ONLY valid JSON with 5 real medical terms (no placeholder text):
             res = await client.post(
                 "http://localhost:11434/api/generate",
                 json={
-                    "model": OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "format": "json",
-                    "stream": False,
+                    "model": OLLAMA_MODEL, "prompt": prompt,
+                    "format": "json", "stream": False,
                     "options": {"num_predict": 300, "temperature": 0.2}
                 }
             )
             parsed = json.loads(res.json().get("response", "{}"))
             suggestions_data = build_suggestions(
-                parsed.get("subtopics", []),
-                docs,
-                existing=all_existing
+                parsed.get("subtopics", []), docs,
+                existing=all_existing, bioportal_evidence=bp_evidence
             )
         except Exception as e:
             logger.error(f"LLM failed: {type(e).__name__}: {e}")
 
     if not suggestions_data:
-        suggestions_data = await generate_llm_fallback(request.concept, ancestors, docs)
+        suggestions_data = await generate_llm_fallback(
+            request.concept, ancestors, docs, bp_evidence
+        )
 
     if suggestions_data:
         _suggestion_cache[ck] = {"suggestions": suggestions_data, "evidences": evidences}
         save_cache(_suggestion_cache)
+
+        if suggestions_data: # Store ontology_evidence in cache only if suggestions are present
+            _suggestion_cache[ck] = {"suggestions": suggestions_data, "evidences": evidences, "ontology_evidence": bp_evidence}
+            save_cache(_suggestion_cache)
 
     db.query(
         "MERGE (p:Project {id: $pid}) ON CREATE SET p.title = $title, p.created_at = $date",
@@ -655,7 +785,8 @@ Return ONLY valid JSON with 5 real medical terms (no placeholder text):
 
     return {
         "project_id": p_id, "parent": request.concept,
-        "suggestions": suggestions_data, "evidence_pointers": evidences
+        "suggestions": suggestions_data, "evidence_pointers": evidences,
+        "ontology_evidence": bp_evidence # Return in response
     }
 
 
@@ -675,8 +806,7 @@ async def suggest_staged(request: StagedSuggestRequest):
         db.query(
             "MERGE (parent:Concept {name: $pname}) "
             "SET parent.evidence = $ev, parent.stage = $stage",
-            {"pname": request.concept,
-             "ev": json.dumps(cached["evidences"]),
+            {"pname": request.concept, "ev": json.dumps(cached["evidences"]),
              "stage": request.stage}
         )
         if not request.project_id:
@@ -687,51 +817,64 @@ async def suggest_staged(request: StagedSuggestRequest):
             )
         return {
             "project_id": p_id, "parent": request.concept,
-            "stage": request.stage,
-            "suggestions": cached["suggestions"],
-            "evidence_pointers": cached["evidences"], "cached": True
+            "stage": request.stage, "suggestions": cached["suggestions"],
+                "evidence_pointers": cached["evidences"],
+                "ontology_evidence": cached.get("ontology_evidence"), # Retrieve from cache
+                "cached": True
         }
 
-    # GRAPH RAG for staged suggestions
-    graph_context = get_graph_context(
-        request.concept,
-        p_id if request.project_id else None
+    graph_context, bioportal_context = await asyncio.gather(
+        asyncio.to_thread(
+            get_graph_context, request.concept,
+            p_id if request.project_id else None
+        ),
+        get_bioportal_context(request.concept)
     )
 
-    stage_query_map = {
+    bp_evidence = build_bioportal_evidence(bioportal_context, request.concept)
+    synonyms = bioportal_context.get("synonyms", [])
+    synonym_str = " OR ".join(f'"{s}"' for s in synonyms[:2]) if synonyms else ""
+
+    stage_base_queries = {
         "differential": f"{request.symptom} differential diagnosis etiology",
         "mechanism":    f"{request.concept} pathophysiology mechanism",
         "workup":       f"{request.concept} diagnostic workup laboratory imaging",
         "treatment":    f"{request.concept} treatment management therapy",
         "monitoring":   f"{request.concept} monitoring prognosis complications"
     }
-    search_query = stage_query_map.get(
-        request.stage,
-        f"{request.symptom} {request.concept}"
+    base_query = stage_base_queries.get(
+        request.stage, f"{request.symptom} {request.concept}"
     )
+    search_query = f"({base_query}) OR ({synonym_str})" if synonym_str else base_query
+
     docs = await asyncio.to_thread(fetch_pubmed_abstracts, search_query, 3)
     if not docs:
         docs = await asyncio.to_thread(
-            fetch_pubmed_abstracts,
-            f"{request.symptom} {request.concept}", 3
+            fetch_pubmed_abstracts, f"{request.symptom} {request.concept}", 3
         )
 
     evidences = build_evidences(docs)
     context_str = build_context_str(docs)
     available_pmids = ", ".join(str(d["pubid"]) for d in docs) if docs else "none"
 
+    ontology_parts = []
+    if synonyms:
+        ontology_parts.append(f"Synonyms: {', '.join(synonyms[:3])}")
+    semantic_type = bioportal_context.get("semantic_type", "")
+    if semantic_type:
+        ontology_parts.append(f"Type: {semantic_type}")
+    ontology_context = " | ".join(ontology_parts) if ontology_parts else "Not available"
+
     prompt_template = STAGE_PROMPTS.get(request.stage, STAGE_PROMPTS["differential"])
     prompt = prompt_template.format(
-        symptom=request.symptom,
-        concept=request.concept,
-        context=context_str,
+        symptom=request.symptom, concept=request.concept,
+        context=context_str, ontology_context=ontology_context,
         graph_summary=graph_context["graph_summary"] or "No prior context"
     )
-    prompt += f"\n\nAvailable PMIDs to use: {available_pmids}"
+    prompt += f"\n\nAvailable PMIDs: {available_pmids}"
 
     all_existing = list(set(
-        graph_context["existing_nodes"] +
-        graph_context["siblings"] +
+        graph_context["existing_nodes"] + graph_context["siblings"] +
         graph_context["related_explored"]
     ))
 
@@ -741,10 +884,8 @@ async def suggest_staged(request: StagedSuggestRequest):
             res = await client.post(
                 "http://localhost:11434/api/generate",
                 json={
-                    "model": OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "format": "json",
-                    "stream": False,
+                    "model": OLLAMA_MODEL, "prompt": prompt,
+                    "format": "json", "stream": False,
                     "options": {"num_predict": 300, "temperature": 0.2}
                 }
             )
@@ -752,21 +893,21 @@ async def suggest_staged(request: StagedSuggestRequest):
             logger.info(f"Staged LLM raw: {raw[:200]}")
             parsed = json.loads(raw)
             suggestions_data = build_suggestions(
-                parsed.get("subtopics", []),
-                docs,
-                stage=request.stage,
-                existing=all_existing
+                parsed.get("subtopics", []), docs,
+                stage=request.stage, existing=all_existing,
+                bioportal_evidence=bp_evidence
             )
         except Exception as e:
             logger.error(f"Staged LLM failed: {type(e).__name__}: {e}")
 
     if not suggestions_data:
         suggestions_data = await generate_llm_fallback(
-            request.concept, [request.symptom], docs
+            request.concept, [request.symptom], docs, bp_evidence
         )
 
     if suggestions_data:
-        _suggestion_cache[ck] = {"suggestions": suggestions_data, "evidences": evidences}
+        # Store ontology_evidence in cache only if suggestions are present
+        _suggestion_cache[ck] = {"suggestions": suggestions_data, "evidences": evidences, "ontology_evidence": bp_evidence}
         save_cache(_suggestion_cache)
 
     db.query(
@@ -777,8 +918,7 @@ async def suggest_staged(request: StagedSuggestRequest):
     db.query(
         "MERGE (parent:Concept {name: $pname}) "
         "SET parent.evidence = $ev, parent.stage = $stage",
-        {"pname": request.concept,
-         "ev": json.dumps(evidences),
+        {"pname": request.concept, "ev": json.dumps(evidences),
          "stage": request.stage}
     )
     if not request.project_id:
@@ -790,9 +930,9 @@ async def suggest_staged(request: StagedSuggestRequest):
 
     return {
         "project_id": p_id, "parent": request.concept,
-        "stage": request.stage,
-        "suggestions": suggestions_data,
-        "evidence_pointers": evidences
+        "stage": request.stage, "suggestions": suggestions_data,
+        "evidence_pointers": evidences,
+        "ontology_evidence": bp_evidence # Return in response
     }
 
 
@@ -820,53 +960,32 @@ async def list_projects():
     return [dict(r) for r in results]
 
 
-@app.post("/fetch-full-evidence")
-async def fetch_full_evidence(request: dict):
-    pubid = request.get("pubid")
-    if not pubid:
-        return {"error": "pubid required"}
-    try:
-        handle = Entrez.efetch(
-            db="pubmed", id=pubid,
-            rettype="abstract", retmode="text"
-        )
-        return {"full_content": handle.read()}
-    except Exception as e:
-        return {"error": str(e)}
-class SaveArticleRequest(BaseModel):
-    pubid: str
-    title: str
-
 @app.post("/saved-articles")
 async def save_article(request: SaveArticleRequest):
-    """Save a PubMed article to the global library."""
     try:
         db.query("""
             MERGE (a:SavedArticle {pubid: $pubid})
             SET a.title = $title, a.saved_at = $date
         """, {
-            "pubid": request.pubid,
-            "title": request.title,
+            "pubid": request.pubid, "title": request.title,
             "date": datetime.now().isoformat()
         })
-        logger.info(f"Saved article: {request.pubid}")
         return {"status": "success", "pubid": request.pubid}
     except Exception as e:
-        logger.error(f"Failed to save article: {e}")
         return {"status": "error", "message": str(e)}
+
 
 @app.get("/saved-articles")
 async def get_saved_articles():
-    """Get all saved PubMed articles."""
     results = db.query(
         "MATCH (a:SavedArticle) RETURN a.pubid as pubid, a.title as title, "
         "a.saved_at as saved_at ORDER BY a.saved_at DESC"
     )
     return [dict(r) for r in results]
 
+
 @app.delete("/saved-articles/{pubid}")
 async def delete_saved_article(pubid: str):
-    """Remove an article from the saved library."""
     try:
         db.query(
             "MATCH (a:SavedArticle {pubid: $pubid}) DETACH DELETE a",
@@ -875,6 +994,21 @@ async def delete_saved_article(pubid: str):
         return {"status": "success", "deleted": pubid}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+@app.post("/fetch-full-evidence")
+async def fetch_full_evidence(request: dict):
+    pubid = request.get("pubid")
+    if not pubid:
+        return {"error": "pubid required"}
+    try:
+        handle = Entrez.efetch(
+            db="pubmed", id=pubid, rettype="abstract", retmode="text"
+        )
+        return {"full_content": handle.read()}
+    except Exception as e:
+        return {"error": str(e)}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)

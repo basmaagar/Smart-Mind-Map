@@ -13,6 +13,13 @@ interface Suggestion {
   evidence: any;
   parent: string;
   stage?: string;
+  ontology_evidence?: { // This is now at the top level
+    ontology: string;
+    semantic_type: string;
+    definition: string;
+    concept_id: string;
+    synonyms: string[];
+  } | null;
 }
 
 const SYMPTOM_LIST = [
@@ -171,7 +178,12 @@ const App: React.FC = () => {
   const [elements, setElements] = useState<any[]>([]);
   const [pendingSuggestions, setPendingSuggestions] = useState<Suggestion[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
-  const [selectedNode, setSelectedNode] = useState<{ id: string; label: string; evidence: any[] } | null>(null);
+  const [selectedNode, setSelectedNode] = useState<{
+    id: string;
+    label: string;
+    evidence: any[];
+    ontology_evidence?: any;
+  } | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [mapSearchTerm, setMapSearchTerm] = useState("");
   const [loading, setLoading] = useState(false);
@@ -220,13 +232,14 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
       project_id: currentProjectId,
       ancestors
     });
-    const { project_id, parent, suggestions } = res.data;
+    const { project_id, parent, suggestions, ontology_evidence } = res.data; // ontology_evidence is now at top level
     if (!currentProjectId) setCurrentProjectId(project_id);
     await fetchGraph(project_id);
     setPendingSuggestions(prev => [...prev, ...suggestions.map((s: any) => ({
       ...s,
       evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
-      parent
+      parent,
+      ontology_evidence: s.ontology_evidence || ontology_evidence // Assign ontology_evidence from suggestion or top-level
     }))]);
     setSearchInput("");
   } catch (err) {
@@ -242,14 +255,14 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
       const res = await axios.post(`${API_BASE}/suggest-staged`, {
         symptom, concept, stage, accepted_nodes: [], project_id: currentProjectId
       });
-      const { project_id, parent, suggestions } = res.data;
+      const { project_id, parent, suggestions, ontology_evidence } = res.data; // ontology_evidence is now at top level
       if (!currentProjectId) setCurrentProjectId(project_id);
       await fetchGraph(project_id);
       setPendingSuggestions(prev => [...prev, ...suggestions.map((s: any) => ({
         ...s,
         evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
-        parent, stage
-      }))]);
+        parent, stage, ontology_evidence
+      }))]); // Assign ontology_evidence from suggestion or top-level
     } catch (err) { console.error("Clinical generation failed:", err); }
     finally { setLoading(false); }
   };
@@ -276,14 +289,14 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
       concept,
       project_id: currentProjectId,
       ancestors: []
-    });
-    const { project_id, parent, suggestions } = res.data;
+    }); // ontology_evidence is now at top level
+    const { project_id, parent, suggestions, ontology_evidence } = res.data;
     if (!currentProjectId) setCurrentProjectId(project_id);
     await fetchGraph(project_id);
     setPendingSuggestions(prev => [...prev, ...suggestions.map((s: any) => ({
       ...s,
       evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
-      parent
+      parent, ontology_evidence: s.ontology_evidence || ontology_evidence
     }))]);
     setSearchInput("");
   } catch (err) {
@@ -323,8 +336,15 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
       let parsed = [];
       if (typeof evField === 'string') parsed = JSON.parse(evField);
       else if (Array.isArray(evField)) parsed = evField;
-      setSelectedNode({ id: nodeData.id, label: nodeData.label, evidence: parsed });
-    } catch { setSelectedNode({ id: nodeData.id, label: nodeData.label, evidence: [] }); }
+      setSelectedNode({ // Access ontology_evidence directly from nodeData
+        id: nodeData.id,
+        label: nodeData.label,
+        evidence: parsed,
+        ontology_evidence: nodeData.ontology_evidence || null
+      });
+    } catch {
+      setSelectedNode({ id: nodeData.id, label: nodeData.label, evidence: [], ontology_evidence: null });
+    }
   };
 
   const handleNewProject = () => {
@@ -416,7 +436,16 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
   const existingNodeIds = new Set(elements.filter(e => e.group === 'nodes').map(e => e.data.id));
   const suggestionNodes = pendingSuggestions.map(sug => ({
     group: 'nodes', classes: 'suggestion',
-    data: { id: `sug-${sug.name.toLowerCase().trim()}`, label: sug.name, isSuggestion: true, evidence: sug.evidence, parentId: sug.parent, suggestionObj: sug, stage: sug.stage }
+    data: { 
+      id: `sug-${sug.name.toLowerCase().trim()}`, 
+      label: sug.name, 
+      isSuggestion: true, 
+      evidence: sug.evidence, 
+      parentId: sug.parent, 
+      suggestionObj: sug, 
+      stage: sug.stage,
+      ontology_evidence: sug.ontology_evidence 
+    }
   }));
   const allNodeIds = new Set([...existingNodeIds, ...suggestionNodes.map(n => n.data.id)]);
   const suggestionEdges = pendingSuggestions
@@ -613,18 +642,21 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
           </div>
 
           <div style={{ borderTop: '0.5px solid #e2e8f0', margin: '8px 16px' }} />
-
-          <div style={{ padding: '0 0 8px' }}>
-            <div style={{ fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '0 20px', marginBottom: '8px' }}>Evidence</div>
-            <div style={{ padding: '3px 20px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span style={{ fontSize: '10px', fontWeight: 500, background: '#E6F1FB', color: '#185FA5', padding: '2px 6px', borderRadius: '4px' }}>● PubMed</span>
-              <span style={{ fontSize: '11px', color: '#64748b' }}>Verified</span>
-            </div>
-            <div style={{ padding: '3px 20px', display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
-              <span style={{ fontSize: '10px', fontWeight: 500, background: '#f0f4f8', color: '#64748b', padding: '2px 6px', borderRadius: '4px' }}>○ LLM</span>
-              <span style={{ fontSize: '11px', color: '#64748b' }}>Inferred</span>
-            </div>
-          </div>
+<div style={{ padding: '0 0 8px' }}>
+  <div style={{ fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '0 20px', marginBottom: '8px' }}>Evidence</div>
+  <div style={{ padding: '3px 20px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+    <span style={{ fontSize: '10px', fontWeight: 500, background: '#E6F1FB', color: '#185FA5', padding: '2px 6px', borderRadius: '4px' }}>● PubMed</span>
+    <span style={{ fontSize: '11px', color: '#64748b' }}>Verified</span>
+  </div>
+  <div style={{ padding: '3px 20px', display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+    <span style={{ fontSize: '10px', fontWeight: 500, background: '#EEEDFE', color: '#7F77DD', padding: '2px 6px', borderRadius: '4px' }}>● BioPortal</span>
+    <span style={{ fontSize: '11px', color: '#64748b' }}>Ontology</span>
+  </div>
+  <div style={{ padding: '3px 20px', display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+    <span style={{ fontSize: '10px', fontWeight: 500, background: '#f0f4f8', color: '#64748b', padding: '2px 6px', borderRadius: '4px' }}>○ LLM</span>
+    <span style={{ fontSize: '11px', color: '#64748b' }}>Inferred</span>
+  </div>
+</div>
 
           <div style={{ marginTop: 'auto', padding: '12px 20px', borderTop: '0.5px solid #e2e8f0', fontSize: '10px', color: '#94a3b8' }}>
             MedMind v1.0
