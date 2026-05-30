@@ -13,6 +13,15 @@ interface EvidenceItem {
   definition?: string;
   concept_uri?: string;
   synonyms?: string[];
+  // ClinicalTrials fields
+  trials?: {
+    nct_id: string;
+    title: string;
+    status: string;
+    phase: string;
+    sponsor: string;
+    url: string;
+  }[];
 }
 
 interface SidebarProps {
@@ -52,7 +61,11 @@ const Sidebar: React.FC<SidebarProps> = ({ data, onClose, onArticleSaved }) => {
   const pubmedItems: EvidenceItem[] = (data?.evidence || []).filter(
     e => !e.source || e.source === "pubmed"
   );
-  const bioportalItem: EvidenceItem | null = data?.ontology_evidence || null; // Extract directly
+  const bioportalItem: EvidenceItem | null =
+    (data?.evidence || []).find(e => e.source === "bioportal") || null;
+  const ctItem: EvidenceItem | null =
+    (data?.evidence || []).find(e => e.source === "clinicaltrials") || null;
+
 
   return (
     <aside style={{
@@ -166,6 +179,84 @@ const Sidebar: React.FC<SidebarProps> = ({ data, onClose, onArticleSaved }) => {
                       View ↗
                     </a>
                   )}
+                </div>
+              </div>
+            )}
+
+            {/* CLINICALTRIALS EVIDENCE CARD */}
+            {ctItem && ctItem.trials && ctItem.trials.length > 0 && (
+              <div style={{
+                marginBottom: '8px', background: '#EAF3DE',
+                border: '0.5px solid #C0DD97', borderRadius: '8px', padding: '9px'
+              }}>
+                {/* ClinicalTrials tag */}
+                <div style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '4px',
+                  fontSize: '10px', color: '#3B6D11', background: '#D4EDBB',
+                  padding: '2px 6px', borderRadius: '4px', marginBottom: '5px'
+                }}>
+                  <svg width="10" height="10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"
+                      d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                  </svg>
+                  ClinicalTrials.gov · {ctItem.trials.length} Trial{ctItem.trials.length > 1 ? 's' : ''}
+                </div>
+
+                {/* Trial list */}
+                {ctItem.trials.slice(0, 2).map((trial, idx) => (
+                  <div key={trial.nct_id} style={{
+                    marginBottom: idx < ctItem.trials!.length - 1 ? '6px' : 0,
+                    paddingBottom: idx < Math.min(ctItem.trials!.length, 2) - 1 ? '6px' : 0,
+                    borderBottom: idx < Math.min(ctItem.trials!.length, 2) - 1 ? '0.5px solid #C0DD97' : 'none'
+                  }}>
+                    <div style={{
+                      fontSize: '11px', fontWeight: 500, color: '#3B6D11',
+                      lineHeight: 1.4, marginBottom: '3px'
+                    }}>
+                      {trial.title}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                      {/* Status badge */}
+                      <span style={{
+                        fontSize: '9px', fontWeight: 500,
+                        background: trial.status === 'RECRUITING' ? '#D4EDBB' : '#f0f4f8',
+                        color: trial.status === 'RECRUITING' ? '#3B6D11' : '#64748b',
+                        padding: '1px 5px', borderRadius: '3px',
+                        border: `0.5px solid ${trial.status === 'RECRUITING' ? '#C0DD97' : '#e2e8f0'}`
+                      }}>
+                        {trial.status}
+                      </span>
+                      {/* Phase badge */}
+                      {trial.phase && trial.phase !== 'N/A' && (
+                        <span style={{
+                          fontSize: '9px', color: '#64748b',
+                          background: '#f0f4f8', padding: '1px 5px',
+                          borderRadius: '3px', border: '0.5px solid #e2e8f0'
+                        }}>
+                          {trial.phase}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+
+                {/* Footer */}
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between',
+                  alignItems: 'center', paddingTop: '6px',
+                  borderTop: '0.5px solid #C0DD97', marginTop: '6px'
+                }}>
+                  <span style={{ fontSize: '9px', color: '#3B6D11' }}>
+                    {ctItem.trials[0].nct_id}
+                  </span>
+                  <a
+                    href={ctItem.trials[0].url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ fontSize: '10px', color: '#3B6D11', textDecoration: 'none' }}
+                  >
+                    View ↗
+                  </a>
                 </div>
               </div>
             )}
@@ -295,10 +386,10 @@ const Sidebar: React.FC<SidebarProps> = ({ data, onClose, onArticleSaved }) => {
         padding: '10px 14px', borderTop: '0.5px solid #e2e8f0'
       }}>
         <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-          RAG Engine · PubMed + BioPortal
+          RAG Engine · PubMed + BioPortal + ClinicalTrials
         </div>
         <div style={{ fontSize: '10px', color: '#1D9E75', marginTop: '2px' }}>
-          ● 36M+ articles · 1500+ ontologies
+          ● 36M+ articles · 1500+ ontologies · ClinicalTrials.gov
         </div>
       </div>
     </aside>

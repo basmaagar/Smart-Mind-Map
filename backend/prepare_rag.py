@@ -46,10 +46,10 @@ def prepare_pointer_rag():
 
     print(f"✅ Loaded {len(pointer_docs)} documents.")
 
-    # FIXED: switched from all-MiniLM-L6-v2 (general) to PubMedBERT (medical-specific)
+    # Switching to a medical-specific model as per architectural requirements
     # This alone meaningfully improves retrieval relevance for medical concepts
     embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
+        model_name="microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
     )
 
     print("Building FAISS index — this will take a few minutes...")

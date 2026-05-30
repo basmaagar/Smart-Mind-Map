@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import axios from 'axios';
 import { jsPDF } from 'jspdf';
 import MindMap from './components/MindMap';
@@ -6,6 +6,9 @@ import type { MindMapHandle } from './components/MindMap';
 import Sidebar from './components/Sidebar';
 import ProjectMenu from './components/ProjectMenu';
 import PubMedSync from './components/PubMedSync';
+import ClinicalTrialsPanel from './components/ClinicalTrialsPanel';
+import Auth from './components/Auth';
+
 const API_BASE = "http://127.0.0.1:8000";
 
 interface Suggestion {
@@ -13,13 +16,6 @@ interface Suggestion {
   evidence: any;
   parent: string;
   stage?: string;
-  ontology_evidence?: { // This is now at the top level
-    ontology: string;
-    semantic_type: string;
-    definition: string;
-    concept_id: string;
-    synonyms: string[];
-  } | null;
 }
 
 const SYMPTOM_LIST = [
@@ -63,7 +59,7 @@ export const classifyNode = (label: string): string => {
   return 'default';
 };
 
-// Export utilities
+// --- EXPORT UTILITIES ---
 const downloadFile = (content: string, filename: string, mimeType: string) => {
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
@@ -170,36 +166,87 @@ const exportPDF = (elements: any[], projectTitle: string) => {
     y += depth === 0 ? 8 : 6;
   });
   doc.setTextColor(150, 150, 150); doc.setFontSize(7);
-  doc.text('MedMind — AI-Powered Medical Knowledge Mapping | PubMed RAG', margin, 290);
+  doc.text('MedMind — AI-Powered Medical Knowledge Mapping | PubMed Graph RAG', margin, 290);
   doc.save(`${projectTitle}.pdf`);
 };
 
 const App: React.FC = () => {
+  // --- AUTH STATE ---
+  const [token, setToken] = useState<string | null>(() => localStorage.getItem('medmind_token'));
+  const [userEmail, setUserEmail] = useState<string>(() => localStorage.getItem('medmind_email') || '');
+  const [userFullName, setUserFullName] = useState<string>(() => localStorage.getItem('medmind_fullname') || '');
+
+  // --- APP STATE ---
   const [elements, setElements] = useState<any[]>([]);
   const [pendingSuggestions, setPendingSuggestions] = useState<Suggestion[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
-  const [selectedNode, setSelectedNode] = useState<{
-    id: string;
-    label: string;
-    evidence: any[];
-    ontology_evidence?: any;
-  } | null>(null);
+  const [selectedNode, setSelectedNode] = useState<{ id: string; label: string; evidence: any[] } | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [mapSearchTerm, setMapSearchTerm] = useState("");
   const [loading, setLoading] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [isPubMedSyncOpen, setIsPubMedSyncOpen] = useState(false);
+  const [isClinicalTrialsOpen, setIsClinicalTrialsOpen] = useState(false);
+  const [pubmedSyncRefresh, setPubmedSyncRefresh] = useState(0);
+
+  // --- CLINICAL MODE STATE ---
   const [pendingSymptom, setPendingSymptom] = useState<string | null>(null);
   const [clinicalMode, setClinicalMode] = useState(false);
   const [rootSymptom, setRootSymptom] = useState<string | null>(null);
   const [currentStageIndex, setCurrentStageIndex] = useState(0);
   const [acceptedPerStage, setAcceptedPerStage] = useState<Record<string, string[]>>({});
-  const [isPubMedSyncOpen, setIsPubMedSyncOpen] = useState(false);
-  const [pubmedSyncRefresh, setPubmedSyncRefresh] = useState(0);
 
-  const mindMapRef = useRef<MindMapHandle>(null);
+  const mindMapRef = React.useRef<MindMapHandle>(null);
   const projectTitle = elements.find(e => e.data?.isRoot)?.data?.label || 'MedMind_Export';
 
+  // --- AXIOS INTERCEPTORS ---
+  React.useEffect(() => {
+    const reqInterceptor = axios.interceptors.request.use(config => {
+      const t = localStorage.getItem('medmind_token');
+      if (t) config.headers.Authorization = `Bearer ${t}`;
+      return config;
+    });
+    return () => axios.interceptors.request.eject(reqInterceptor);
+  }, []);
+
+  React.useEffect(() => {
+    const resInterceptor = axios.interceptors.response.use(
+      response => response,
+      error => {
+        if (error.response?.status === 401) handleLogout();
+        return Promise.reject(error);
+      }
+    );
+    return () => axios.interceptors.response.eject(resInterceptor);
+  }, []);
+
+  // --- AUTH HANDLERS ---
+  const handleAuthSuccess = (newToken: string, email: string, fullName: string) => {
+    localStorage.setItem('medmind_token', newToken);
+    localStorage.setItem('medmind_email', email);
+    localStorage.setItem('medmind_fullname', fullName);
+    setToken(newToken);
+    setUserEmail(email);
+    setUserFullName(fullName);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('medmind_token');
+    localStorage.removeItem('medmind_email');
+    localStorage.removeItem('medmind_fullname');
+    setToken(null);
+    setUserEmail('');
+    setUserFullName('');
+    handleNewProject();
+  };
+
+  // --- SHOW AUTH SCREEN IF NOT LOGGED IN ---
+  if (!token) {
+    return <Auth onAuthSuccess={handleAuthSuccess} />;
+  }
+
+  // --- GRAPH HANDLERS ---
   const fetchGraph = async (projectId: string) => {
     try {
       const res = await axios.get(`${API_BASE}/projects/${projectId}`);
@@ -208,46 +255,34 @@ const App: React.FC = () => {
     } catch (err) { console.error("Error fetching graph:", err); }
   };
 
-const handleGenerate = async (concept: string, ancestors: string[] = []) => {
-  if (!concept.trim()) return;
-
-  // If user types a new root concept while a map already exists,
-  // reset to a new project — prevents orphan disconnected subgraphs
-  if (currentProjectId && ancestors.length === 0 && elements.length > 0) {
-    handleNewProject();
-    await new Promise(resolve => setTimeout(resolve, 50));
-  }
-
-  // Symptom detection only for root-level concepts (no ancestors)
-  if (!currentProjectId && ancestors.length === 0 && isSymptom(concept)) {
-    setPendingSymptom(concept);
-    setSearchInput("");
-    return;
-  }
-
-  setLoading(true);
-  try {
-    const res = await axios.post(`${API_BASE}/suggest`, {
-      concept,
-      project_id: currentProjectId,
-      ancestors
-    });
-    const { project_id, parent, suggestions, ontology_evidence } = res.data; // ontology_evidence is now at top level
-    if (!currentProjectId) setCurrentProjectId(project_id);
-    await fetchGraph(project_id);
-    setPendingSuggestions(prev => [...prev, ...suggestions.map((s: any) => ({
-      ...s,
-      evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
-      parent,
-      ontology_evidence: s.ontology_evidence || ontology_evidence // Assign ontology_evidence from suggestion or top-level
-    }))]);
-    setSearchInput("");
-  } catch (err) {
-    console.error("Generation failed:", err);
-  } finally {
-    setLoading(false);
-  }
-};
+  const handleGenerate = async (concept: string, ancestors: string[] = []) => {
+    if (!concept.trim()) return;
+    if (currentProjectId && ancestors.length === 0 && elements.length > 0) {
+      handleNewProject();
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (!currentProjectId && ancestors.length === 0 && isSymptom(concept)) {
+      setPendingSymptom(concept);
+      setSearchInput("");
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await axios.post(`${API_BASE}/suggest`, {
+        concept, project_id: currentProjectId, ancestors
+      });
+      const { project_id, parent, suggestions } = res.data;
+      if (!currentProjectId) setCurrentProjectId(project_id);
+      await fetchGraph(project_id);
+      setPendingSuggestions(prev => [...prev, ...suggestions.map((s: any) => ({
+        ...s,
+        evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
+        parent
+      }))]);
+      setSearchInput("");
+    } catch (err) { console.error("Generation failed:", err); }
+    finally { setLoading(false); }
+  };
 
   const handleClinicalGenerateWithSymptom = async (symptom: string, concept: string, stage: string) => {
     setLoading(true);
@@ -255,14 +290,14 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
       const res = await axios.post(`${API_BASE}/suggest-staged`, {
         symptom, concept, stage, accepted_nodes: [], project_id: currentProjectId
       });
-      const { project_id, parent, suggestions, ontology_evidence } = res.data; // ontology_evidence is now at top level
+      const { project_id, parent, suggestions } = res.data;
       if (!currentProjectId) setCurrentProjectId(project_id);
       await fetchGraph(project_id);
       setPendingSuggestions(prev => [...prev, ...suggestions.map((s: any) => ({
         ...s,
         evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
-        parent, stage, ontology_evidence
-      }))]); // Assign ontology_evidence from suggestion or top-level
+        parent, stage
+      }))]);
     } catch (err) { console.error("Clinical generation failed:", err); }
     finally { setLoading(false); }
   };
@@ -278,33 +313,27 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
     await handleClinicalGenerateWithSymptom(symptom, symptom, 'differential');
   };
 
- const enterNormalMode = async () => {
-  if (!pendingSymptom) return;
-  const concept = pendingSymptom;
-  setPendingSymptom(null);
-  // Call the API directly, bypassing the symptom detection check
-  setLoading(true);
-  try {
-    const res = await axios.post(`${API_BASE}/suggest`, {
-      concept,
-      project_id: currentProjectId,
-      ancestors: []
-    }); // ontology_evidence is now at top level
-    const { project_id, parent, suggestions, ontology_evidence } = res.data;
-    if (!currentProjectId) setCurrentProjectId(project_id);
-    await fetchGraph(project_id);
-    setPendingSuggestions(prev => [...prev, ...suggestions.map((s: any) => ({
-      ...s,
-      evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
-      parent, ontology_evidence: s.ontology_evidence || ontology_evidence
-    }))]);
-    setSearchInput("");
-  } catch (err) {
-    console.error("Generation failed:", err);
-  } finally {
-    setLoading(false);
-  }
-};
+  const enterNormalMode = async () => {
+    if (!pendingSymptom) return;
+    const concept = pendingSymptom;
+    setPendingSymptom(null);
+    setLoading(true);
+    try {
+      const res = await axios.post(`${API_BASE}/suggest`, {
+        concept, project_id: currentProjectId, ancestors: []
+      });
+      const { project_id, parent, suggestions } = res.data;
+      if (!currentProjectId) setCurrentProjectId(project_id);
+      await fetchGraph(project_id);
+      setPendingSuggestions(prev => [...prev, ...suggestions.map((s: any) => ({
+        ...s,
+        evidence: typeof s.evidence === 'string' ? JSON.parse(s.evidence) : s.evidence,
+        parent
+      }))]);
+      setSearchInput("");
+    } catch (err) { console.error("Generation failed:", err); }
+    finally { setLoading(false); }
+  };
 
   const handleAcceptSuggestion = async (sug: Suggestion) => {
     if (!currentProjectId) return;
@@ -336,15 +365,8 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
       let parsed = [];
       if (typeof evField === 'string') parsed = JSON.parse(evField);
       else if (Array.isArray(evField)) parsed = evField;
-      setSelectedNode({ // Access ontology_evidence directly from nodeData
-        id: nodeData.id,
-        label: nodeData.label,
-        evidence: parsed,
-        ontology_evidence: nodeData.ontology_evidence || null
-      });
-    } catch {
-      setSelectedNode({ id: nodeData.id, label: nodeData.label, evidence: [], ontology_evidence: null });
-    }
+      setSelectedNode({ id: nodeData.id, label: nodeData.label, evidence: parsed });
+    } catch { setSelectedNode({ id: nodeData.id, label: nodeData.label, evidence: [] }); }
   };
 
   const handleNewProject = () => {
@@ -372,10 +394,9 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
     if (currentStageIndex > 0) setCurrentStageIndex(prev => prev - 1);
   };
 
-  // Progress ring calculation
+  // Progress ring
   const stagesComplete = clinicalMode
-    ? STAGES.filter(s => (acceptedPerStage[s.id] || []).length > 0).length
-    : 0;
+    ? STAGES.filter(s => (acceptedPerStage[s.id] || []).length > 0).length : 0;
   const progressPercent = Math.round((stagesComplete / STAGES.length) * 100);
   const ringCircumference = 2 * Math.PI * 11;
   const ringOffset = ringCircumference - (progressPercent / 100) * ringCircumference;
@@ -403,9 +424,9 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
     const root = rootNodes.length > 0
       ? rootNodes.sort((a, b) =>
           edges.filter(e => e.data.source === b.data.id).length -
-          edges.filter(e => e.data.source === a.data.id).length
-        )[0]
+          edges.filter(e => e.data.source === a.data.id).length)[0]
       : nodes[0];
+
     const depths: Record<string, number> = {};
     if (root) {
       const queue = [{ id: root.data.id, d: 0 }];
@@ -420,6 +441,7 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
         });
       }
     }
+
     return els.map(el => {
       if (el.group === 'nodes') {
         const depth = depths[el.data.id] || 0;
@@ -436,16 +458,7 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
   const existingNodeIds = new Set(elements.filter(e => e.group === 'nodes').map(e => e.data.id));
   const suggestionNodes = pendingSuggestions.map(sug => ({
     group: 'nodes', classes: 'suggestion',
-    data: { 
-      id: `sug-${sug.name.toLowerCase().trim()}`, 
-      label: sug.name, 
-      isSuggestion: true, 
-      evidence: sug.evidence, 
-      parentId: sug.parent, 
-      suggestionObj: sug, 
-      stage: sug.stage,
-      ontology_evidence: sug.ontology_evidence 
-    }
+    data: { id: `sug-${sug.name.toLowerCase().trim()}`, label: sug.name, isSuggestion: true, evidence: sug.evidence, parentId: sug.parent, suggestionObj: sug, stage: sug.stage }
   }));
   const allNodeIds = new Set([...existingNodeIds, ...suggestionNodes.map(n => n.data.id)]);
   const suggestionEdges = pendingSuggestions
@@ -455,7 +468,7 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
       data: { id: `edge-sug-${sug.parent.toLowerCase().trim()}-${sug.name.toLowerCase().trim()}`, source: sug.parent.toLowerCase().trim(), target: `sug-${sug.name.toLowerCase().trim()}` }
     }));
 
-  const finalElements = React.useMemo(() => processHierarchy([...elements, ...suggestionNodes, ...suggestionEdges]), [elements, suggestionNodes, suggestionEdges]);
+  const finalElements = processHierarchy([...elements, ...suggestionNodes, ...suggestionEdges]);
 
   const exportOptions = [
     { label: 'PNG', sublabel: 'Canvas screenshot', action: handleExportPNG, color: '#185FA5' },
@@ -467,11 +480,8 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
   return (
     <div style={{ backgroundColor: '#f0f4f8', color: '#1a202c', display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
       <ProjectMenu isOpen={isHistoryOpen} setIsOpen={setIsHistoryOpen} onSelectProject={fetchGraph} onNewProject={handleNewProject} />
-      <PubMedSync
-        isOpen={isPubMedSyncOpen}
-        setIsOpen={setIsPubMedSyncOpen}
-        refreshTrigger={pubmedSyncRefresh}
-      />
+      <PubMedSync isOpen={isPubMedSyncOpen} setIsOpen={setIsPubMedSyncOpen} refreshTrigger={pubmedSyncRefresh} />
+      <ClinicalTrialsPanel isOpen={isClinicalTrialsOpen} setIsOpen={setIsClinicalTrialsOpen} concept={elements.find(e => e.data?.isRoot)?.data?.label || null} />
 
       {/* Header */}
       <header style={{
@@ -504,9 +514,7 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
             onKeyDown={e => e.key === 'Enter' && handleGenerate(searchInput)}
             disabled={clinicalMode}
           />
-          {loading && (
-            <div style={{ width: '12px', height: '12px', border: '2px solid #185FA5', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
-          )}
+          {loading && <div style={{ width: '12px', height: '12px', border: '2px solid #185FA5', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />}
         </div>
 
         {/* Map search */}
@@ -525,17 +533,14 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
           )}
         </div>
 
-        {/* Progress ring — only in clinical mode */}
+        {/* Progress ring */}
         {clinicalMode && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 10px', background: '#f0f4f8', border: '0.5px solid #e2e8f0', borderRadius: '8px', flexShrink: 0 }}>
             <svg width="32" height="32" viewBox="0 0 28 28">
               <circle cx="14" cy="14" r="11" fill="none" stroke="#E6F1FB" strokeWidth="3" />
               <circle cx="14" cy="14" r="11" fill="none" stroke="#185FA5" strokeWidth="3"
-                strokeDasharray={ringCircumference}
-                strokeDashoffset={ringOffset}
-                strokeLinecap="round"
-                transform="rotate(-90 14 14)"
-              />
+                strokeDasharray={ringCircumference} strokeDashoffset={ringOffset}
+                strokeLinecap="round" transform="rotate(-90 14 14)" />
               <text x="14" y="18" textAnchor="middle" fontSize="8" fontWeight="500" fill="#185FA5">
                 {stagesComplete}/{STAGES.length}
               </text>
@@ -589,9 +594,54 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
             )}
           </div>
 
+          {/* User badge + logout */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '6px',
+              padding: '4px 10px', background: '#f0f4f8',
+              border: '0.5px solid #e2e8f0', borderRadius: '8px'
+            }}>
+              <div style={{
+                width: '20px', height: '20px', borderRadius: '50%',
+                background: '#185FA5', display: 'flex', alignItems: 'center',
+                justifyContent: 'center', fontSize: '10px', color: '#fff', fontWeight: 600
+              }}>
+                {userEmail.charAt(0).toUpperCase()}
+              </div>
+              <span style={{ fontSize: '11px', color: '#334155', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {userFullName || userEmail}
+              </span>
+            </div>
+            <button
+              onClick={handleLogout}
+              title="Sign out"
+              style={{
+                background: 'none', border: '0.5px solid #e2e8f0',
+                borderRadius: '8px', color: '#64748b', cursor: 'pointer',
+                padding: '5px 8px', fontSize: '11px', display: 'flex',
+                alignItems: 'center', gap: '4px'
+              }}
+              onMouseEnter={e => {
+                (e.currentTarget as HTMLButtonElement).style.borderColor = '#F09595';
+                (e.currentTarget as HTMLButtonElement).style.color = '#A32D2D';
+              }}
+              onMouseLeave={e => {
+                (e.currentTarget as HTMLButtonElement).style.borderColor = '#e2e8f0';
+                (e.currentTarget as HTMLButtonElement).style.color = '#64748b';
+              }}
+            >
+              <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"
+                  d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+              Sign out
+            </button>
+          </div>
+
           <button style={{ background: 'none', border: '0.5px solid #e2e8f0', borderRadius: '8px', color: '#64748b', cursor: 'pointer', padding: '5px 8px' }}>
             <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
           </button>
         </div>
@@ -603,21 +653,28 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
           <div style={{ padding: '14px 0 8px' }}>
             <div style={{ fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '0 20px', marginBottom: '6px' }}>Workspace</div>
             {[
-              { id: 'neural', label: 'Knowledge Map', icon: 'M13 10V3L4 14h7v7l9-11h-7z', active: true, onClick: handleNewProject },
+              { id: 'neural', label: 'Knowledge Map', icon: 'M13 10V3L4 14h7v7l9-11h-7z', active: true },
               { id: 'history', label: 'Session History', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
               { id: 'trials', label: 'Clinical Trials', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2' },
               { id: 'pubmed', label: 'PubMed Sync', icon: 'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253' },
             ].map(item => (
               <button key={item.id}
-                onClick={() => { if (item.id === 'history') setIsHistoryOpen(true); if (item.id === 'neural') handleNewProject(); }}
-                style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '7px 12px', margin: '0 8px 2px', width: 'calc(100% - 16px)', border: 'none', background: item.active ? '#E6F1FB' : 'none', borderRadius: '8px', color: item.active ? '#185FA5' : '#64748b', cursor: 'pointer', textAlign: 'left' }}
                 onClick={() => {
                   if (item.id === 'history') setIsHistoryOpen(true);
-                  if (item.id === 'pubmed') setIsPubMedSyncOpen(true);
                   if (item.id === 'neural') handleNewProject();
+                  if (item.id === 'pubmed') setIsPubMedSyncOpen(true);
+                  if (item.id === 'trials') setIsClinicalTrialsOpen(true);
+                }}
+                style={{
+                  width: 'calc(100% - 16px)', display: 'flex', alignItems: 'center', gap: '8px',
+                  padding: '7px 12px', margin: '0 8px 2px', border: 'none',
+                  background: item.active ? '#E6F1FB' : 'none', borderRadius: '8px',
+                  color: item.active ? '#185FA5' : '#64748b', cursor: 'pointer', textAlign: 'left'
                 }}
               >
-                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={item.icon} /></svg>
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={item.icon} />
+                </svg>
                 <span style={{ fontSize: '12px', fontWeight: item.active ? 500 : 400 }}>{item.label}</span>
               </button>
             ))}
@@ -642,21 +699,26 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
           </div>
 
           <div style={{ borderTop: '0.5px solid #e2e8f0', margin: '8px 16px' }} />
-<div style={{ padding: '0 0 8px' }}>
-  <div style={{ fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '0 20px', marginBottom: '8px' }}>Evidence</div>
-  <div style={{ padding: '3px 20px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-    <span style={{ fontSize: '10px', fontWeight: 500, background: '#E6F1FB', color: '#185FA5', padding: '2px 6px', borderRadius: '4px' }}>● PubMed</span>
-    <span style={{ fontSize: '11px', color: '#64748b' }}>Verified</span>
-  </div>
-  <div style={{ padding: '3px 20px', display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
-    <span style={{ fontSize: '10px', fontWeight: 500, background: '#EEEDFE', color: '#7F77DD', padding: '2px 6px', borderRadius: '4px' }}>● BioPortal</span>
-    <span style={{ fontSize: '11px', color: '#64748b' }}>Ontology</span>
-  </div>
-  <div style={{ padding: '3px 20px', display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
-    <span style={{ fontSize: '10px', fontWeight: 500, background: '#f0f4f8', color: '#64748b', padding: '2px 6px', borderRadius: '4px' }}>○ LLM</span>
-    <span style={{ fontSize: '11px', color: '#64748b' }}>Inferred</span>
-  </div>
-</div>
+
+          <div style={{ padding: '0 0 8px' }}>
+            <div style={{ fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '0 20px', marginBottom: '8px' }}>Evidence</div>
+            <div style={{ padding: '3px 20px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{ fontSize: '10px', fontWeight: 500, background: '#E6F1FB', color: '#185FA5', padding: '2px 6px', borderRadius: '4px' }}>● PubMed</span>
+              <span style={{ fontSize: '11px', color: '#64748b' }}>Verified</span>
+            </div>
+            <div style={{ padding: '3px 20px', display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+              <span style={{ fontSize: '10px', fontWeight: 500, background: '#EEEDFE', color: '#7F77DD', padding: '2px 6px', borderRadius: '4px' }}>● BioPortal</span>
+              <span style={{ fontSize: '11px', color: '#64748b' }}>Ontology</span>
+            </div>
+            <div style={{ padding: '3px 20px', display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+              <span style={{ fontSize: '10px', fontWeight: 500, background: '#D4EDBB', color: '#3B6D11', padding: '2px 6px', borderRadius: '4px' }}>● Trials</span>
+              <span style={{ fontSize: '11px', color: '#64748b' }}>ClinicalTrials</span>
+            </div>
+            <div style={{ padding: '3px 20px', display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+              <span style={{ fontSize: '10px', fontWeight: 500, background: '#f0f4f8', color: '#64748b', padding: '2px 6px', borderRadius: '4px' }}>○ LLM</span>
+              <span style={{ fontSize: '11px', color: '#64748b' }}>Inferred</span>
+            </div>
+          </div>
 
           <div style={{ marginTop: 'auto', padding: '12px 20px', borderTop: '0.5px solid #e2e8f0', fontSize: '10px', color: '#94a3b8' }}>
             MedMind v1.0
@@ -752,13 +814,10 @@ const handleGenerate = async (concept: string, ancestors: string[] = []) => {
           onClose={() => setSelectedNode(null)}
           key={selectedNode?.id}
           onArticleSaved={() => setPubmedSyncRefresh(prev => prev + 1)}
-        /> 
-        
-             </div>
+        />
+      </div>
 
-      <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
-      `}</style>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 };
