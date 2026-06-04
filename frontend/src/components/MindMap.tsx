@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useImperativeHandle, forwardRef } from 'react';
+import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from 'react';
 import cytoscape from 'cytoscape';
 
 export type MindMapHandle = {
@@ -296,7 +296,9 @@ const MindMapInner = forwardRef<MindMapHandle, MindMapProps>(({
     prevElementsRef.current = signature;
 
     const oldPositions = new Map();
-    cyInstance.nodes().forEach(n => oldPositions.set(n.id(), { ...n.position() }));
+    cyInstance.nodes().forEach(n => {
+      oldPositions.set(n.id(), { ...n.position() });
+    });
 
     cyInstance.elements().remove();
     cyInstance.add(elements);

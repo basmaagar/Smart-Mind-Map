@@ -41,7 +41,7 @@ interface SidebarProps {
   onArticleSaved?: () => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ data, onClose, onArticleSaved }) => {
+const Sidebar: React.FC<SidebarProps> = ({ data, onArticleSaved }) => {
   const [savedPubids, setSavedPubids] = useState<Set<string>>(new Set());
   const [savingId, setSavingId] = useState<string | null>(null);
 
