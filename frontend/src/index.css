@@ -1,18 +1,18 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Space+Mono:wght@400;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --bg-dark: #000000;
-  --bg-panel: #050505;
-  --accent-blue: #007fff;
-  --accent-green: #00ff00;
-  --text-main: #ffffff;
-  --text-dim: #444444;
-  --border-dim: #111111;
-  --glow-blue: 0 0 15px rgba(0, 127, 255, 0.4);
+  --bg-dark: #f5f7fb;
+  --bg-panel: #ffffff;
+  --accent-blue: #185fa5;
+  --accent-green: #1d9e75;
+  --text-main: #0f172a;
+  --text-dim: #64748b;
+  --border-dim: rgba(15, 23, 42, 0.08);
+  --glow-blue: 0 0 15px rgba(24, 95, 165, 0.12);
 }
 
 * {
@@ -20,15 +20,20 @@
 }
 
 html, body, #root {
-  height: 100vh;
-  width: 100vw;
+  min-height: 100%;
+  width: 100%;
   margin: 0;
   padding: 0;
   background-color: var(--bg-dark);
   color: var(--text-main);
-  font-family: 'JetBrains Mono', monospace;
-  overflow: hidden;
-  font-size: 14px; /* Base size */
+  font-family: 'Manrope', sans-serif;
+  overflow-x: hidden;
+  overflow-y: auto;
+  font-size: 15px;
+}
+
+body {
+  line-height: 1.5;
 }
 
 /* Force SVG sizes to be controlled */
@@ -59,14 +64,14 @@ svg {
 .app-container {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  min-height: 100vh;
   width: 100vw;
 }
 
 .main-layout {
   display: flex;
   flex: 1;
-  overflow: hidden;
+  overflow: visible;
 }
 
 /* Radar Sweep Animation */

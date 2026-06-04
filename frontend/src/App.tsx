@@ -8,6 +8,8 @@ import ProjectMenu from './components/ProjectMenu';
 import PubMedSync from './components/PubMedSync';
 import ClinicalTrialsPanel from './components/ClinicalTrialsPanel';
 import Auth from './components/Auth';
+import LandingPage from './components/LandingPage';
+
 
 const API_BASE = "http://127.0.0.1:8000";
 
@@ -189,7 +191,10 @@ const App: React.FC = () => {
   const [isPubMedSyncOpen, setIsPubMedSyncOpen] = useState(false);
   const [isClinicalTrialsOpen, setIsClinicalTrialsOpen] = useState(false);
   const [pubmedSyncRefresh, setPubmedSyncRefresh] = useState(0);
-
+  const [showLanding, setShowLanding] = useState<boolean>(() => {
+  // Show landing only if user is not already logged in
+  return !localStorage.getItem('medmind_token');
+});
   // --- CLINICAL MODE STATE ---
   const [pendingSymptom, setPendingSymptom] = useState<string | null>(null);
   const [clinicalMode, setClinicalMode] = useState(false);
@@ -229,6 +234,8 @@ const App: React.FC = () => {
     setToken(newToken);
     setUserEmail(email);
     setUserFullName(fullName);
+    setShowLanding(false);
+
   };
 
   const handleLogout = () => {
@@ -242,10 +249,13 @@ const App: React.FC = () => {
   };
 
   // --- SHOW AUTH SCREEN IF NOT LOGGED IN ---
-  if (!token) {
-    return <Auth onAuthSuccess={handleAuthSuccess} />;
-  }
+ if (showLanding) {
+  return <LandingPage onGetStarted={() => setShowLanding(false)} />;
+}
 
+if (!token) {
+  return <Auth onAuthSuccess={handleAuthSuccess} />;
+}
   // --- GRAPH HANDLERS ---
   const fetchGraph = async (projectId: string) => {
     try {

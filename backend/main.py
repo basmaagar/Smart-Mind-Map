@@ -35,7 +35,6 @@ Entrez.email = os.getenv("ENTREZ_EMAIL", "your_email@example.com")
 SECRET_KEY = os.getenv("SECRET_KEY", "medmind-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
-
 BIOPORTAL_ONTOLOGIES = "DOID,MESH,SNOMEDCT,NCI,HP"
 
 logger.info(f"BioPortal key set: {bool(BIOPORTAL_API_KEY)}")
@@ -50,19 +49,18 @@ def hash_password(password: str) -> str:
         bcrypt.gensalt()
     ).decode('utf-8')
 
-
 def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(
         plain.encode('utf-8'),
         hashed.encode('utf-8')
     )
 
-
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
 # --- CACHE ---
 def load_cache() -> dict:
     if os.path.exists(CACHE_FILE):
@@ -113,6 +111,11 @@ class Neo4jHandler:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Create Neo4j constraints on startup for data integrity
+    db.query("CREATE CONSTRAINT user_email_unique IF NOT EXISTS FOR (u:User) REQUIRE u.email IS UNIQUE")
+    db.query("CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE")
+    db.query("CREATE CONSTRAINT project_id_unique IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE")
+    logger.info("Neo4j constraints verified.")
     yield
     logger.info("Shutting down: closing Neo4j connection.")
     db.close()
@@ -191,6 +194,26 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     except JWTError:
         raise credentials_exception
 
+# --- NEO4J HELPER: link project to user atomically ---
+def link_project_to_user(user_id: str, project_id: str, title: str, date: str):
+    """
+    FIXED: Single atomic query that creates/merges the Project node
+    AND creates the OWNS relationship in one operation.
+    The previous two-query approach (MERGE project, then MATCH user MATCH project MERGE rel)
+    failed silently when the project didn't exist yet at relationship creation time.
+    """
+    db.query("""
+        MATCH (u:User {id: $uid})
+        MERGE (p:Project {id: $pid})
+        ON CREATE SET p.title = $title, p.created_at = $date
+        MERGE (u)-[:OWNS]->(p)
+    """, {
+        "uid": user_id,
+        "pid": project_id,
+        "title": title,
+        "date": date
+    })
+
 # --- BIOPORTAL ---
 async def get_bioportal_context(concept: str) -> dict:
     if not BIOPORTAL_API_KEY:
@@ -224,7 +247,6 @@ async def get_bioportal_context(concept: str) -> dict:
                 },
                 headers={"Accept": "application/json"}
             )
-
             if res.status_code != 200:
                 return result
 
@@ -719,13 +741,13 @@ async def get_project_graph(
     if not ownership:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    query = """
-    MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
-    OPTIONAL MATCH (n:Concept)-[r:RELATED_TO]->(m:Concept)
-    WHERE (root)-[:RELATED_TO*0..]->(n)
-    RETURN root, n, r, m
-    """
-    results = db.query(query, {"pid": project_id})
+    results = db.query("""
+        MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
+        OPTIONAL MATCH (n:Concept)-[r:RELATED_TO]->(m:Concept)
+        WHERE (root)-[:RELATED_TO*0..]->(n)
+        RETURN root, n, r, m
+    """, {"pid": project_id})
+
     elements = []
     added_ids = set()
 
@@ -797,29 +819,26 @@ async def suggest_and_save(
     ck = request.concept.lower().strip()
     ancestors = request.ancestors or []
     user_id = current_user["user_id"]
+    now = datetime.now().isoformat()
 
     if ck in _suggestion_cache:
         logger.info(f"Cache hit: '{ck}'")
         cached = _suggestion_cache[ck]
-        db.query(
-            "MERGE (p:Project {id: $pid}) ON CREATE SET p.title = $title, p.created_at = $date",
-            {"pid": p_id, "title": f"Exploration: {request.concept}",
-             "date": datetime.now().isoformat()}
+        # FIXED: atomic project creation + ownership in one query
+        link_project_to_user(
+            user_id, p_id,
+            f"Exploration: {request.concept}", now
         )
-        db.query("""
-            MATCH (u:User {id: $uid}) MATCH (p:Project {id: $pid})
-            MERGE (u)-[:OWNS]->(p)
-        """, {"uid": user_id, "pid": p_id})
         db.query(
             "MERGE (parent:Concept {name: $pname}) SET parent.evidence = $ev",
             {"pname": request.concept, "ev": json.dumps(cached["evidences"])}
         )
         if not request.project_id:
-            db.query(
-                "MATCH (p:Project {id: $pid}) MATCH (c:Concept {name: $cname}) "
-                "MERGE (p)-[:HAS_ROOT]->(c)",
-                {"pid": p_id, "cname": request.concept}
-            )
+            db.query("""
+                MATCH (p:Project {id: $pid})
+                MERGE (c:Concept {name: $cname})
+                MERGE (p)-[:HAS_ROOT]->(c)
+            """, {"pid": p_id, "cname": request.concept})
         return {
             "project_id": p_id, "parent": request.concept,
             "suggestions": cached["suggestions"],
@@ -915,25 +934,21 @@ Return ONLY valid JSON with 5 real medical terms:
         }
         save_cache(_suggestion_cache)
 
-    db.query(
-        "MERGE (p:Project {id: $pid}) ON CREATE SET p.title = $title, p.created_at = $date",
-        {"pid": p_id, "title": f"Exploration: {request.concept}",
-         "date": datetime.now().isoformat()}
+    # FIXED: atomic project creation + ownership
+    link_project_to_user(
+        user_id, p_id,
+        f"Exploration: {request.concept}", now
     )
-    db.query("""
-        MATCH (u:User {id: $uid}) MATCH (p:Project {id: $pid})
-        MERGE (u)-[:OWNS]->(p)
-    """, {"uid": user_id, "pid": p_id})
     db.query(
         "MERGE (parent:Concept {name: $pname}) SET parent.evidence = $ev",
         {"pname": request.concept, "ev": json.dumps(evidences)}
     )
     if not request.project_id:
-        db.query(
-            "MATCH (p:Project {id: $pid}) MATCH (c:Concept {name: $cname}) "
-            "MERGE (p)-[:HAS_ROOT]->(c)",
-            {"pid": p_id, "cname": request.concept}
-        )
+        db.query("""
+            MATCH (p:Project {id: $pid})
+            MERGE (c:Concept {name: $cname})
+            MERGE (p)-[:HAS_ROOT]->(c)
+        """, {"pid": p_id, "cname": request.concept})
 
     return {
         "project_id": p_id, "parent": request.concept,
@@ -950,19 +965,13 @@ async def suggest_staged(
     p_id = request.project_id or str(uuid.uuid4())
     ck = f"staged_{request.stage}_{request.concept.lower().strip()}"
     user_id = current_user["user_id"]
+    now = datetime.now().isoformat()
 
     if ck in _suggestion_cache:
         logger.info(f"Cache hit (staged): '{ck}'")
         cached = _suggestion_cache[ck]
-        db.query(
-            "MERGE (p:Project {id: $pid}) ON CREATE SET p.title = $title, p.created_at = $date",
-            {"pid": p_id, "title": f"Clinical: {request.symptom}",
-             "date": datetime.now().isoformat()}
-        )
-        db.query("""
-            MATCH (u:User {id: $uid}) MATCH (p:Project {id: $pid})
-            MERGE (u)-[:OWNS]->(p)
-        """, {"uid": user_id, "pid": p_id})
+        # FIXED: atomic project creation + ownership
+        link_project_to_user(user_id, p_id, f"Clinical: {request.symptom}", now)
         db.query(
             "MERGE (parent:Concept {name: $pname}) "
             "SET parent.evidence = $ev, parent.stage = $stage",
@@ -970,11 +979,11 @@ async def suggest_staged(
              "stage": request.stage}
         )
         if not request.project_id:
-            db.query(
-                "MATCH (p:Project {id: $pid}) MATCH (c:Concept {name: $cname}) "
-                "MERGE (p)-[:HAS_ROOT]->(c)",
-                {"pid": p_id, "cname": request.concept}
-            )
+            db.query("""
+                MATCH (p:Project {id: $pid})
+                MERGE (c:Concept {name: $cname})
+                MERGE (p)-[:HAS_ROOT]->(c)
+            """, {"pid": p_id, "cname": request.concept})
         return {
             "project_id": p_id, "parent": request.concept,
             "stage": request.stage, "suggestions": cached["suggestions"],
@@ -1071,15 +1080,8 @@ async def suggest_staged(
         }
         save_cache(_suggestion_cache)
 
-    db.query(
-        "MERGE (p:Project {id: $pid}) ON CREATE SET p.title = $title, p.created_at = $date",
-        {"pid": p_id, "title": f"Clinical: {request.symptom}",
-         "date": datetime.now().isoformat()}
-    )
-    db.query("""
-        MATCH (u:User {id: $uid}) MATCH (p:Project {id: $pid})
-        MERGE (u)-[:OWNS]->(p)
-    """, {"uid": user_id, "pid": p_id})
+    # FIXED: atomic project creation + ownership
+    link_project_to_user(user_id, p_id, f"Clinical: {request.symptom}", now)
     db.query(
         "MERGE (parent:Concept {name: $pname}) "
         "SET parent.evidence = $ev, parent.stage = $stage",
@@ -1087,11 +1089,11 @@ async def suggest_staged(
          "stage": request.stage}
     )
     if not request.project_id:
-        db.query(
-            "MATCH (p:Project {id: $pid}) MATCH (c:Concept {name: $cname}) "
-            "MERGE (p)-[:HAS_ROOT]->(c)",
-            {"pid": p_id, "cname": request.concept}
-        )
+        db.query("""
+            MATCH (p:Project {id: $pid})
+            MERGE (c:Concept {name: $cname})
+            MERGE (p)-[:HAS_ROOT]->(c)
+        """, {"pid": p_id, "cname": request.concept})
 
     return {
         "project_id": p_id, "parent": request.concept,
@@ -1134,10 +1136,12 @@ async def save_article(
     current_user: dict = Depends(get_current_user)
 ):
     try:
+        # FIXED: single atomic query — MERGE article then link to user
         db.query("""
             MATCH (u:User {id: $uid})
-            MERGE (a:SavedArticle {pubid: $pubid, owner_id: $uid})
-            SET a.title = $title, a.saved_at = $date
+            MERGE (a:SavedArticle {pubid: $pubid})
+            ON CREATE SET a.title = $title, a.saved_at = $date, a.owner_id = $uid
+            ON MATCH SET a.title = $title
             MERGE (u)-[:SAVED]->(a)
         """, {
             "uid": current_user["user_id"],
@@ -1147,6 +1151,7 @@ async def save_article(
         })
         return {"status": "success", "pubid": request.pubid}
     except Exception as e:
+        logger.error(f"Save article failed: {e}")
         return {"status": "error", "message": str(e)}
 
 

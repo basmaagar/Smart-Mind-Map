@@ -1,7 +1,8 @@
 {
   "dependencies": {
     "cytoscape": "^3.33.2",
-    "jspdf": "^4.2.1"
+    "jspdf": "^4.2.1",
+    "particles-bg": "^2.5.5"
   },
   "devDependencies": {
     "@types/cytoscape": "^3.21.9"
