@@ -94,10 +94,13 @@ class Neo4jHandler:
             logger.error(f"Neo4j connection error: {e}")
             self.driver = None
 
-    def query(self, query, parameters=None):
+    async def query(self, query, parameters=None):
         if not self.driver:
             logger.warning("Database query skipped: No active Neo4j connection.")
             return []
+        return await asyncio.to_thread(self._run_query, query, parameters)
+
+    def _run_query(self, query, parameters=None):
         try:
             with self.driver.session() as session:
                 return list(session.run(query, parameters))
@@ -112,9 +115,9 @@ class Neo4jHandler:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create Neo4j constraints on startup for data integrity
-    db.query("CREATE CONSTRAINT user_email_unique IF NOT EXISTS FOR (u:User) REQUIRE u.email IS UNIQUE")
-    db.query("CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE")
-    db.query("CREATE CONSTRAINT project_id_unique IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE")
+    await db.query("CREATE CONSTRAINT user_email_unique IF NOT EXISTS FOR (u:User) REQUIRE u.email IS UNIQUE")
+    await db.query("CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE")
+    await db.query("CREATE CONSTRAINT project_id_unique IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE")
     logger.info("Neo4j constraints verified.")
     yield
     logger.info("Shutting down: closing Neo4j connection.")
@@ -195,14 +198,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         raise credentials_exception
 
 # --- NEO4J HELPER: link project to user atomically ---
-def link_project_to_user(user_id: str, project_id: str, title: str, date: str):
+async def link_project_to_user(user_id: str, project_id: str, title: str, date: str):
     """
     FIXED: Single atomic query that creates/merges the Project node
     AND creates the OWNS relationship in one operation.
     The previous two-query approach (MERGE project, then MATCH user MATCH project MERGE rel)
     failed silently when the project didn't exist yet at relationship creation time.
     """
-    db.query("""
+    await db.query("""
         MATCH (u:User {id: $uid})
         MERGE (p:Project {id: $pid})
         ON CREATE SET p.title = $title, p.created_at = $date
@@ -429,7 +432,7 @@ def build_suggestions(
     return suggestions
 
 
-def get_graph_context(
+async def get_graph_context(
     concept: str,
     project_id: Optional[str] = None,
     user_id: Optional[str] = None
@@ -440,7 +443,7 @@ def get_graph_context(
     }
     try:
         if project_id and user_id:
-            all_nodes_result = db.query("""
+            all_nodes_result = await db.query("""
                 MATCH (u:User {id: $uid})-[:OWNS]->(p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
                 OPTIONAL MATCH (root)-[:RELATED_TO*0..]->(n:Concept)
                 RETURN DISTINCT n.name as name
@@ -450,7 +453,7 @@ def get_graph_context(
                 if r["name"] and r["name"] != concept
             ]
 
-        siblings_result = db.query("""
+        siblings_result = await db.query("""
             MATCH (parent:Concept)-[:RELATED_TO]->(current:Concept {name: $cname})
             MATCH (parent)-[:RELATED_TO]->(sibling:Concept)
             WHERE sibling.name <> $cname
@@ -458,7 +461,7 @@ def get_graph_context(
         """, {"cname": concept})
         context["siblings"] = [r["name"] for r in siblings_result if r["name"]]
 
-        depth_result = db.query("""
+        depth_result = await db.query("""
             MATCH path = (root:Concept)-[:RELATED_TO*0..]->(current:Concept {name: $cname})
             WHERE NOT ()-[:RELATED_TO]->(root)
             RETURN length(path) as depth
@@ -467,7 +470,7 @@ def get_graph_context(
         if depth_result:
             context["depth"] = depth_result[0]["depth"]
 
-        explored_result = db.query("""
+        explored_result = await db.query("""
             MATCH (current:Concept {name: $cname})-[:RELATED_TO]->(child:Concept)
             RETURN DISTINCT child.name as name
         """, {"cname": concept})
@@ -646,7 +649,7 @@ async def register(request: RegisterRequest):
         )
 
     email = request.email.lower().strip()
-    existing = db.query(
+    existing = await db.query(
         "MATCH (u:User {email: $email}) RETURN u",
         {"email": email}
     )
@@ -660,7 +663,7 @@ async def register(request: RegisterRequest):
     hashed = hash_password(request.password)
     full_name = request.full_name or ""
 
-    db.query("""
+    await db.query("""
         CREATE (u:User {
             id: $uid,
             email: $email,
@@ -685,7 +688,7 @@ async def register(request: RegisterRequest):
 @app.post("/auth/login", response_model=TokenResponse)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     email = form_data.username.lower().strip()
-    result = db.query(
+    result = await db.query(
         "MATCH (u:User {email: $email}) RETURN u",
         {"email": email}
     )
@@ -716,7 +719,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 @app.get("/auth/me")
 async def get_me(current_user: dict = Depends(get_current_user)):
-    result = db.query(
+    result = await db.query(
         "MATCH (u:User {id: $uid}) RETURN u.email as email, u.full_name as full_name",
         {"uid": current_user["user_id"]}
     )
@@ -734,14 +737,14 @@ async def get_project_graph(
     project_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    ownership = db.query(
+    ownership = await db.query(
         "MATCH (u:User {id: $uid})-[:OWNS]->(p:Project {id: $pid}) RETURN p",
         {"uid": current_user["user_id"], "pid": project_id}
     )
     if not ownership:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    results = db.query("""
+    results = await db.query("""
         MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
         OPTIONAL MATCH (n:Concept)-[r:RELATED_TO]->(m:Concept)
         WHERE (root)-[:RELATED_TO*0..]->(n)
@@ -789,7 +792,7 @@ async def delete_project(
     project_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    ownership = db.query(
+    ownership = await db.query(
         "MATCH (u:User {id: $uid})-[:OWNS]->(p:Project {id: $pid}) RETURN p",
         {"uid": current_user["user_id"], "pid": project_id}
     )
@@ -797,12 +800,12 @@ async def delete_project(
         raise HTTPException(status_code=403, detail="Access denied")
 
     try:
-        db.query("""
+        await db.query("""
             MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
             OPTIONAL MATCH (root)-[:RELATED_TO*0..]->(n:Concept)
             DETACH DELETE n, root, p
-        """, {"pid": project_id})
-        db.query("MATCH (p:Project {id: $pid}) DETACH DELETE p", {"pid": project_id})
+        """, {"pid": project_id}) # type: ignore
+        await db.query("MATCH (p:Project {id: $pid}) DETACH DELETE p", {"pid": project_id}) # type: ignore
         logger.info(f"Deleted project: {project_id}")
         return {"status": "success", "deleted": project_id}
     except Exception as e:
@@ -824,17 +827,17 @@ async def suggest_and_save(
     if ck in _suggestion_cache:
         logger.info(f"Cache hit: '{ck}'")
         cached = _suggestion_cache[ck]
-        # FIXED: atomic project creation + ownership in one query
-        link_project_to_user(
+        # FIXED: atomic project creation + ownership in one query # type: ignore
+        await link_project_to_user(
             user_id, p_id,
             f"Exploration: {request.concept}", now
-        )
-        db.query(
+        ) # type: ignore
+        await db.query(
             "MERGE (parent:Concept {name: $pname}) SET parent.evidence = $ev",
             {"pname": request.concept, "ev": json.dumps(cached["evidences"])}
         )
         if not request.project_id:
-            db.query("""
+            await db.query("""
                 MATCH (p:Project {id: $pid})
                 MERGE (c:Concept {name: $cname})
                 MERGE (p)-[:HAS_ROOT]->(c)
@@ -846,10 +849,8 @@ async def suggest_and_save(
         }
 
     graph_context, bioportal_context, trials = await asyncio.gather(
-        asyncio.to_thread(
-            get_graph_context, request.concept,
-            p_id if request.project_id else None, user_id
-        ),
+        get_graph_context(
+            request.concept, p_id if request.project_id else None, user_id),
         get_bioportal_context(request.concept),
         fetch_clinical_trials(request.concept, 3)
     )
@@ -923,28 +924,28 @@ Return ONLY valid JSON with 5 real medical terms:
             logger.error(f"LLM failed: {type(e).__name__}: {e}")
 
     if not suggestions_data:
-        suggestions_data = await generate_llm_fallback(
+        suggestions_data = await generate_llm_fallback( # Add await here
             request.concept, ancestors, docs, bp_evidence, ct_evidence
         )
 
     if suggestions_data:
         _suggestion_cache[ck] = {
             "suggestions": suggestions_data, "evidences": evidences,
-            "ontology_evidence": bp_evidence
+            "ontology_evidence": bp_evidence # type: ignore
         }
         save_cache(_suggestion_cache)
 
     # FIXED: atomic project creation + ownership
-    link_project_to_user(
+    await link_project_to_user(
         user_id, p_id,
         f"Exploration: {request.concept}", now
     )
-    db.query(
+    await db.query(
         "MERGE (parent:Concept {name: $pname}) SET parent.evidence = $ev",
         {"pname": request.concept, "ev": json.dumps(evidences)}
     )
     if not request.project_id:
-        db.query("""
+        await db.query("""
             MATCH (p:Project {id: $pid})
             MERGE (c:Concept {name: $cname})
             MERGE (p)-[:HAS_ROOT]->(c)
@@ -970,16 +971,16 @@ async def suggest_staged(
     if ck in _suggestion_cache:
         logger.info(f"Cache hit (staged): '{ck}'")
         cached = _suggestion_cache[ck]
-        # FIXED: atomic project creation + ownership
-        link_project_to_user(user_id, p_id, f"Clinical: {request.symptom}", now)
-        db.query(
+        # FIXED: atomic project creation + ownership # type: ignore
+        await link_project_to_user(user_id, p_id, f"Clinical: {request.symptom}", now)
+        await db.query(
             "MERGE (parent:Concept {name: $pname}) "
             "SET parent.evidence = $ev, parent.stage = $stage",
             {"pname": request.concept, "ev": json.dumps(cached["evidences"]),
              "stage": request.stage}
         )
         if not request.project_id:
-            db.query("""
+            await db.query("""
                 MATCH (p:Project {id: $pid})
                 MERGE (c:Concept {name: $cname})
                 MERGE (p)-[:HAS_ROOT]->(c)
@@ -991,10 +992,8 @@ async def suggest_staged(
         }
 
     graph_context, bioportal_context, trials = await asyncio.gather(
-        asyncio.to_thread(
-            get_graph_context, request.concept,
-            p_id if request.project_id else None, user_id
-        ),
+        get_graph_context(
+            request.concept, p_id if request.project_id else None, user_id),
         get_bioportal_context(request.concept),
         fetch_clinical_trials(request.concept, 3)
     )
@@ -1069,7 +1068,7 @@ async def suggest_staged(
             logger.error(f"Staged LLM failed: {type(e).__name__}: {e}")
 
     if not suggestions_data:
-        suggestions_data = await generate_llm_fallback(
+        suggestions_data = await generate_llm_fallback( # Add await here
             request.concept, [request.symptom], docs, bp_evidence, ct_evidence
         )
 
@@ -1081,15 +1080,15 @@ async def suggest_staged(
         save_cache(_suggestion_cache)
 
     # FIXED: atomic project creation + ownership
-    link_project_to_user(user_id, p_id, f"Clinical: {request.symptom}", now)
-    db.query(
+    await link_project_to_user(user_id, p_id, f"Clinical: {request.symptom}", now)
+    await db.query(
         "MERGE (parent:Concept {name: $pname}) "
         "SET parent.evidence = $ev, parent.stage = $stage",
         {"pname": request.concept, "ev": json.dumps(evidences),
          "stage": request.stage}
     )
     if not request.project_id:
-        db.query("""
+        await db.query("""
             MATCH (p:Project {id: $pid})
             MERGE (c:Concept {name: $cname})
             MERGE (p)-[:HAS_ROOT]->(c)
@@ -1107,7 +1106,7 @@ async def accept_suggestion(
     request: AcceptSuggestionRequest,
     current_user: dict = Depends(get_current_user)
 ):
-    db.query("""
+    await db.query("""
         MATCH (parent:Concept {name: $pname})
         MERGE (child:Concept {name: $cname})
         SET child.evidence = $ev
@@ -1122,7 +1121,7 @@ async def accept_suggestion(
 
 @app.get("/projects")
 async def list_projects(current_user: dict = Depends(get_current_user)):
-    results = db.query(
+    results = await db.query(
         "MATCH (u:User {id: $uid})-[:OWNS]->(p:Project) "
         "RETURN p.id as id, p.title as title ORDER BY p.created_at DESC",
         {"uid": current_user["user_id"]}
@@ -1137,7 +1136,7 @@ async def save_article(
 ):
     try:
         # FIXED: single atomic query — MERGE article then link to user
-        db.query("""
+        await db.query("""
             MATCH (u:User {id: $uid})
             MERGE (a:SavedArticle {pubid: $pubid})
             ON CREATE SET a.title = $title, a.saved_at = $date, a.owner_id = $uid
@@ -1157,7 +1156,7 @@ async def save_article(
 
 @app.get("/saved-articles")
 async def get_saved_articles(current_user: dict = Depends(get_current_user)):
-    results = db.query(
+    results = await db.query(
         "MATCH (u:User {id: $uid})-[:SAVED]->(a:SavedArticle) "
         "RETURN a.pubid as pubid, a.title as title, a.saved_at as saved_at "
         "ORDER BY a.saved_at DESC",
@@ -1172,7 +1171,7 @@ async def delete_saved_article(
     current_user: dict = Depends(get_current_user)
 ):
     try:
-        db.query(
+        await db.query(
             "MATCH (u:User {id: $uid})-[:SAVED]->(a:SavedArticle {pubid: $pubid}) "
             "DETACH DELETE a",
             {"uid": current_user["user_id"], "pubid": pubid}

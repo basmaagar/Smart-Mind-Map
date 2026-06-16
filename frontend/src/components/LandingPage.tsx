@@ -315,9 +315,7 @@ const LandingPage: React.FC<LandingPageProps> = ({ onGetStarted }) => {
                 What happens in the seconds
                 <span style={{ display: 'block', background: 'linear-gradient(135deg, #185FA5, #0F766E)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>after you type.</span>
               </h2>
-              <p style={{ fontSize: '17px', color: '#64748b', lineHeight: 1.7, maxWidth: '540px', margin: '0 auto' }}>
-                The landing page now opens with a clear clinical narrative instead of a neon demo look.
-              </p>
+             
             </div>
           </FadeIn>
 
