@@ -20,3 +20,6 @@ dist/
 .env.*
 !.env.example
 .vscode/
+
+
+backend/suggestion_cache.json

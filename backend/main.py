@@ -175,9 +175,12 @@ PLACEHOLDER_TERMS = {
     "second_diagnosis", "third_diagnosis", "fourth_diagnosis",
     "must_not_miss", "must_not_miss_diagnosis", "write_actual_medical_term",
     "specific_medical_subtopic", "write_actual_pmid", "pmid_from_above",
-    "pmid", "term", "none", "actual_medical_term", "actual_mechanism_name",
-    "actual_test_name", "actual_treatment_name", "actual_parameter_name",
-    "actual_disease_name", "write_real_medical_term_here", "fill_with_real_term"
+    "pmid", "term", "none", "actual_medical_term",
+    "actual_disease_name", "write_real_medical_term_here", "fill_with_real_term",
+    # New generic placeholders for prompt examples
+    "disease_name_1", "disease_name_2", "disease_name_3", "disease_name_4", "disease_name_5",
+    "mechanism_name_1", "test_name_1", "treatment_name_1", "parameter_name_1",
+    "pmid_1", "pmid_2", "pmid_3", "pmid_4", "pmid_5", "subtopic_name_1"
 }
 
 # --- AUTH DEPENDENCY ---
@@ -339,7 +342,10 @@ async def fetch_clinical_trials(concept: str, max_results: int = 3) -> list:
                     "format": "json",
                     "fields": "NCTId,BriefTitle,OverallStatus,Phase,LeadSponsorName"
                 },
-                headers={"Accept": "application/json"}
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "MedMind/1.0 (Clinical Research Tool; contact: your_email@example.com)"
+                }
             )
             if res.status_code != 200:
                 return []
@@ -567,6 +573,10 @@ Return ONLY valid JSON: {{"subtopics":[{{"term":"write_real_medical_term_here"}}
                     "options": {"num_predict": 200, "temperature": 0.4}
                 }
             )
+            if res.status_code != 200:
+                logger.error(f"Fallback LLM returned status {res.status_code}: {res.text}")
+                return []
+                
             parsed = json.loads(res.json().get("response", "{}"))
             items = parsed.get("subtopics", [])
             if docs:
@@ -590,49 +600,49 @@ STAGE_PROMPTS = {
     "differential": """You are an experienced clinician. Patient presents with: '{symptom}'.
 PubMed evidence (use ONLY these PMIDs): {context}
 Ontology context: {ontology_context}
-Graph context — DO NOT suggest these already-mapped concepts: {graph_summary}
+Graph context - DO NOT suggest these already-mapped concepts: {graph_summary}
 Generate exactly 5 real differential diagnoses ranked most to least likely.
 Write actual disease names — NOT placeholder text.
 Return ONLY valid JSON:
 {{"subtopics":[
-  {{"term":"Real_Disease_Name","likelihood":"common","evidence_pubid":"ACTUAL_PMID"}},
-  {{"term":"Real_Disease_Name","likelihood":"common","evidence_pubid":"ACTUAL_PMID"}},
-  {{"term":"Real_Disease_Name","likelihood":"less_common","evidence_pubid":"ACTUAL_PMID"}},
-  {{"term":"Real_Disease_Name","likelihood":"less_common","evidence_pubid":"ACTUAL_PMID"}},
-  {{"term":"Real_Disease_Name","likelihood":"rare_but_critical","evidence_pubid":"ACTUAL_PMID"}}
+  {{"term":"<DISEASE_NAME_1>","likelihood":"common","evidence_pubid":"<PMID_1>"}},
+  {{"term":"<DISEASE_NAME_2>","likelihood":"common","evidence_pubid":"<PMID_2>"}},
+  {{"term":"<DISEASE_NAME_3>","likelihood":"less_common","evidence_pubid":"<PMID_3>"}},
+  {{"term":"<DISEASE_NAME_4>","likelihood":"less_common","evidence_pubid":"<PMID_4>"}},
+  {{"term":"<DISEASE_NAME_5>","likelihood":"rare_but_critical","evidence_pubid":"<PMID_5>"}}
 ]}}""",
     "mechanism": """You are a medical pathophysiologist.
 Symptom: '{symptom}' | Diagnosis: '{concept}'
 PubMed evidence: {context}
 Ontology context: {ontology_context}
-Graph context — DO NOT repeat: {graph_summary}
+Graph context - DO NOT repeat: {graph_summary}
 List 5 real pathophysiological mechanisms. Write actual mechanism names.
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"Real_Mechanism_Name","evidence_pubid":"ACTUAL_PMID"}}]}}""",
+{{"subtopics":[{{"term":"<MECHANISM_NAME_1>","evidence_pubid":"<PMID_1>"}}]}}""",
     "workup": """You are a clinical diagnostician.
 Symptom: '{symptom}' | Diagnosis: '{concept}'
 PubMed evidence: {context}
 Ontology context: {ontology_context}
-Graph context — DO NOT repeat: {graph_summary}
+Graph context - DO NOT repeat: {graph_summary}
 List 5 real diagnostic tests ordered by priority. Write actual test names.
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"Real_Test_Name","evidence_pubid":"ACTUAL_PMID"}}]}}""",
+{{"subtopics":[{{"term":"<TEST_NAME_1>","evidence_pubid":"<PMID_1>"}}]}}""",
     "treatment": """You are a clinical pharmacologist.
 Symptom: '{symptom}' | Diagnosis: '{concept}'
 PubMed evidence: {context}
 Ontology context: {ontology_context}
-Graph context — DO NOT repeat: {graph_summary}
+Graph context - DO NOT repeat: {graph_summary}
 List 5 real evidence-based treatments. Write actual treatment names.
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"Real_Treatment_Name","evidence_pubid":"ACTUAL_PMID"}}]}}""",
+{{"subtopics":[{{"term":"<TREATMENT_NAME_1>","evidence_pubid":"<PMID_1>"}}]}}""",
     "monitoring": """You are a clinical specialist.
 Symptom: '{symptom}' | Condition: '{concept}'
 PubMed evidence: {context}
 Ontology context: {ontology_context}
-Graph context — DO NOT repeat: {graph_summary}
+Graph context - DO NOT repeat: {graph_summary}
 List 5 real monitoring parameters. Write actual parameter names.
 Return ONLY valid JSON:
-{{"subtopics":[{{"term":"Real_Parameter_Name","evidence_pubid":"ACTUAL_PMID"}}]}}"""
+{{"subtopics":[{{"term":"<PARAMETER_NAME_1>","evidence_pubid":"<PMID_1>"}}]}}"""
 }
 
 
@@ -899,8 +909,8 @@ Already mapped — DO NOT suggest: {', '.join(all_existing[:15]) if all_existing
 Suggest 5 NEW, SPECIFIC, REAL medical subtopics for '{request.concept}'.
 - Write actual medical terms, NOT placeholders
 - Every term must have evidence_pubid from: {available_pmids}
-Return ONLY valid JSON with 5 real medical terms:
-{{"subtopics":[{{"term":"FILL_WITH_REAL_TERM","evidence_pubid":"{first_pmid}"}}]}}"""
+Return ONLY valid JSON with 5 real medical terms, e.g.:
+{{"subtopics":[{{"term":"<SUBTOPIC_NAME_1>","evidence_pubid":"{first_pmid}"}}]}}"""
 
     suggestions_data = []
     async with httpx.AsyncClient(timeout=180.0) as client:
@@ -913,6 +923,10 @@ Return ONLY valid JSON with 5 real medical terms:
                     "options": {"num_predict": 300, "temperature": 0.2}
                 }
             )
+            if res.status_code != 200:
+                logger.error(f"Ollama suggest-and-save failed with status {res.status_code}")
+                return await generate_llm_fallback(request.concept, ancestors, docs, bp_evidence, ct_evidence)
+
             parsed = json.loads(res.json().get("response", "{}"))
             suggestions_data = build_suggestions(
                 parsed.get("subtopics", []), docs,
@@ -1056,8 +1070,13 @@ async def suggest_staged(
                     "options": {"num_predict": 300, "temperature": 0.2}
                 }
             )
+            if res.status_code != 200:
+                logger.error(f"Ollama suggest-staged failed with status {res.status_code}")
+                return await generate_llm_fallback(request.concept, [request.symptom], docs, bp_evidence, ct_evidence)
+
             raw = res.json().get("response", "{}")
-            logger.info(f"Staged LLM raw: {raw[:200]}")
+            if raw == "{}":
+                logger.warning("Ollama returned empty response")
             parsed = json.loads(raw)
             suggestions_data = build_suggestions(
                 parsed.get("subtopics", []), docs,
