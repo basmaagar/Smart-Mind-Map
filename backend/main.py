@@ -483,7 +483,8 @@ async def get_graph_context(
         if project_id and user_id:
             all_nodes_result = await db.query("""
                 MATCH (u:User {id: $uid})-[:OWNS]->(p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
-                OPTIONAL MATCH (root)-[:RELATED_TO*0..]->(n:Concept)
+                OPTIONAL MATCH path = (root)-[:RELATED_TO*0..]->(n:Concept)
+                WHERE all(r in relationships(path) WHERE r.project_id = $pid)
                 RETURN DISTINCT n.name as name
             """, {"pid": project_id, "uid": user_id})
             context["existing_nodes"] = [
@@ -491,28 +492,30 @@ async def get_graph_context(
                 if r["name"] and r["name"] != concept
             ]
 
-        siblings_result = await db.query("""
-            MATCH (parent:Concept)-[:RELATED_TO]->(current:Concept {name: $cname})
-            MATCH (parent)-[:RELATED_TO]->(sibling:Concept)
-            WHERE sibling.name <> $cname
-            RETURN DISTINCT sibling.name as name
-        """, {"cname": concept})
-        context["siblings"] = [r["name"] for r in siblings_result if r["name"]]
+        if project_id:
+            siblings_result = await db.query("""
+                MATCH (parent:Concept)-[:RELATED_TO {project_id: $pid}]->(current:Concept {name: $cname})
+                MATCH (parent)-[:RELATED_TO {project_id: $pid}]->(sibling:Concept)
+                WHERE sibling.name <> $cname
+                RETURN DISTINCT sibling.name as name
+            """, {"cname": concept, "pid": project_id})
+            context["siblings"] = [r["name"] for r in siblings_result if r["name"]]
 
-        depth_result = await db.query("""
-            MATCH path = (root:Concept)-[:RELATED_TO*0..]->(current:Concept {name: $cname})
-            WHERE NOT ()-[:RELATED_TO]->(root)
-            RETURN length(path) as depth
-            ORDER BY depth DESC LIMIT 1
-        """, {"cname": concept})
-        if depth_result:
-            context["depth"] = depth_result[0]["depth"]
+            depth_result = await db.query("""
+                MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
+                OPTIONAL MATCH path = (root)-[:RELATED_TO*0..]->(current:Concept {name: $cname})
+                WHERE all(r in relationships(path) WHERE r.project_id = $pid)
+                RETURN length(path) as depth
+                ORDER BY depth DESC LIMIT 1
+            """, {"cname": concept, "pid": project_id})
+            if depth_result and depth_result[0]["depth"] is not None:
+                context["depth"] = depth_result[0]["depth"]
 
-        explored_result = await db.query("""
-            MATCH (current:Concept {name: $cname})-[:RELATED_TO]->(child:Concept)
-            RETURN DISTINCT child.name as name
-        """, {"cname": concept})
-        context["related_explored"] = [r["name"] for r in explored_result if r["name"]]
+            explored_result = await db.query("""
+                MATCH (current:Concept {name: $cname})-[:RELATED_TO {project_id: $pid}]->(child:Concept)
+                RETURN DISTINCT child.name as name
+            """, {"cname": concept, "pid": project_id})
+            context["related_explored"] = [r["name"] for r in explored_result if r["name"]]
 
         summary_parts = []
         if context["existing_nodes"]:
@@ -788,8 +791,9 @@ async def get_project_graph(
 
     results = await db.query("""
         MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
-        OPTIONAL MATCH (n:Concept)-[r:RELATED_TO]->(m:Concept)
-        WHERE (root)-[:RELATED_TO*0..]->(n)
+        OPTIONAL MATCH path = (root)-[:RELATED_TO*0..]->(n:Concept)
+        WHERE all(rel in relationships(path) WHERE rel.project_id = $pid)
+        OPTIONAL MATCH (n)-[r:RELATED_TO {project_id: $pid}]->(m:Concept)
         RETURN root, n, r, m
     """, {"pid": project_id})
 
@@ -843,10 +847,14 @@ async def delete_project(
 
     try:
         await db.query("""
-            MATCH (p:Project {id: $pid})-[:HAS_ROOT]->(root:Concept)
-            OPTIONAL MATCH (root)-[:RELATED_TO*0..]->(n:Concept)
-            DETACH DELETE n, root, p
-        """, {"pid": project_id}) # type: ignore
+            MATCH (p:Project {id: $pid})
+            OPTIONAL MATCH (p)-[hr:HAS_ROOT]->(root:Concept)
+            OPTIONAL MATCH path = (root)-[:RELATED_TO*0..]->(n:Concept)
+            WHERE all(r in relationships(path) WHERE r.project_id = $pid)
+            FOREACH (rel in relationships(path) | DELETE rel)
+            DELETE hr
+            DELETE p
+        """, {"pid": project_id})
         await db.query("MATCH (p:Project {id: $pid}) DETACH DELETE p", {"pid": project_id}) # type: ignore
         logger.info(f"Deleted project: {project_id}")
         return {"status": "success", "deleted": project_id}
@@ -1161,11 +1169,12 @@ async def accept_suggestion(
         MATCH (parent:Concept {name: $pname})
         MERGE (child:Concept {name: $cname})
         SET child.evidence = $ev
-        MERGE (parent)-[:RELATED_TO]->(child)
+        MERGE (parent)-[r:RELATED_TO {project_id: $pid}]->(child)
     """, {
         "pname": request.parent_concept,
         "cname": request.child_concept,
-        "ev": request.evidence
+        "ev": request.evidence,
+        "pid": request.project_id
     })
     return {"status": "success"}
 
