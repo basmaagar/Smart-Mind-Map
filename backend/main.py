@@ -332,27 +332,57 @@ def build_bioportal_evidence(bioportal_context: dict, concept: str) -> dict:
 
 
 async def fetch_clinical_trials(concept: str, max_results: int = 3) -> list:
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            res = await client.get(
-                "https://clinicaltrials.gov/api/v2/studies",
-                params={
-                    "query.cond": concept,
-                    "pageSize": max_results,
-                    "format": "json",
-                    "fields": "NCTId,BriefTitle,OverallStatus,Phase,LeadSponsorName"
-                },
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": "MedMind/1.0 (Clinical Research Tool; contact: your_email@example.com)"
-                }
-            )
-            if res.status_code != 200:
-                return []
+    import urllib.request
+    import urllib.parse
 
-            data = res.json()
+    # Generate candidate queries (fallback to simpler terms if exact is too specific)
+    queries = [concept]
+    words = concept.split()
+    if len(words) > 1:
+        modifiers = {
+            "acute", "chronic", "severe", "mild", "moderate", "benign", "malignant",
+            "primary", "secondary", "transient", "persistent", "progressive", "acquired",
+            "congenital", "hereditary", "familial", "idiopathic", "atypical", "typical",
+            "early-onset", "late-onset", "early", "late"
+        }
+        first_word = words[0].lower().strip("-,. ")
+        if first_word in modifiers:
+            queries.append(" ".join(words[1:]))
+        elif len(words) > 2:
+            first_two = f"{words[0]} {words[1]}".lower().strip("-,. ")
+            if first_two in modifiers or words[0].lower() in modifiers or words[1].lower() in modifiers:
+                queries.append(" ".join(words[2:]))
+
+    def _sync_fetch(query_term: str):
+        url = "https://clinicaltrials.gov/api/v2/studies"
+        params = {
+            "query.cond": query_term,
+            "pageSize": max_results,
+            "format": "json",
+            "fields": "NCTId,BriefTitle,OverallStatus,Phase,LeadSponsorName"
+        }
+        query_string = urllib.parse.urlencode(params)
+        full_url = f"{url}?{query_string}"
+
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "MedMind/1.0 (Clinical Research Tool; contact: your_email@example.com)"
+        }
+
+        req = urllib.request.Request(full_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10.0) as response:
+            if response.status != 200:
+                return {}
+            return json.loads(response.read().decode('utf-8'))
+
+    trials = []
+    for q_term in queries:
+        try:
+            data = await asyncio.to_thread(_sync_fetch, q_term)
             studies = data.get("studies", [])
-            trials = []
+            if not studies:
+                continue
+
             for study in studies:
                 proto = study.get("protocolSection", {})
                 id_module = proto.get("identificationModule", {})
@@ -372,11 +402,13 @@ async def fetch_clinical_trials(concept: str, max_results: int = 3) -> list:
                         "sponsor": sponsor,
                         "url": f"https://clinicaltrials.gov/study/{nct_id}"
                     })
-            logger.info(f"ClinicalTrials: {len(trials)} trials for '{concept}'")
-            return trials
-    except Exception as e:
-        logger.error(f"ClinicalTrials API error: {type(e).__name__}: {e}")
-        return []
+            if trials:
+                logger.info(f"ClinicalTrials: {len(trials)} trials found for query '{q_term}' (original: '{concept}')")
+                break
+        except Exception as e:
+            logger.warning(f"ClinicalTrials API error for query '{q_term}': {type(e).__name__}: {e}")
+
+    return trials
 
 
 def build_clinical_trials_evidence(trials: list) -> dict:

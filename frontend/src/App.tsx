@@ -203,7 +203,6 @@ const App: React.FC = () => {
   const [acceptedPerStage, setAcceptedPerStage] = useState<Record<string, string[]>>({});
 
   const mindMapRef = React.useRef<MindMapHandle>(null);
-  const projectTitle = elements.find(e => e.data?.isRoot)?.data?.label || 'MedMind_Export';
 
   // --- AXIOS INTERCEPTORS ---
   React.useEffect(() => {
@@ -479,6 +478,7 @@ if (!token) {
     }));
 
   const finalElements = processHierarchy([...elements, ...suggestionNodes, ...suggestionEdges]);
+  const projectTitle = finalElements.find(e => e.data?.isRoot)?.data?.label || 'MedMind_Export';
 
   const exportOptions = [
     { label: 'PNG', sublabel: 'Canvas screenshot', action: handleExportPNG, color: '#185FA5' },
@@ -491,7 +491,7 @@ if (!token) {
     <div style={{ backgroundColor: '#f0f4f8', color: '#1a202c', display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
       <ProjectMenu isOpen={isHistoryOpen} setIsOpen={setIsHistoryOpen} onSelectProject={fetchGraph} onNewProject={handleNewProject} />
       <PubMedSync isOpen={isPubMedSyncOpen} setIsOpen={setIsPubMedSyncOpen} refreshTrigger={pubmedSyncRefresh} />
-      <ClinicalTrialsPanel isOpen={isClinicalTrialsOpen} setIsOpen={setIsClinicalTrialsOpen} concept={elements.find(e => e.data?.isRoot)?.data?.label || null} />
+      <ClinicalTrialsPanel isOpen={isClinicalTrialsOpen} setIsOpen={setIsClinicalTrialsOpen} concept={selectedNode?.label || finalElements.find(e => e.data?.isRoot)?.data?.label || null} />
 
       {/* Header */}
       <header style={{
